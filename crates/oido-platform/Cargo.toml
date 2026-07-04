@@ -15,5 +15,14 @@ tracing.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 
-# Las dependencias específicas por OS llegan en Fase 1 (cpal,
-# global-hotkey, tray-icon, ksni, arboard).
+# Cross-platform OS abstractions. cpal/global-hotkey/arboard/enigo each
+# build on all 3 OS via conditional compilation in their own crates;
+# tray-icon covers Win+macOS, ksni covers Linux only.
+cpal.workspace = true
+global-hotkey.workspace = true
+tray-icon.workspace = true
+arboard.workspace = true
+enigo.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
