@@ -48,6 +48,7 @@ pub type TextRx = Receiver<String>;
 
 /// Pipeline vacío. La versión real mantiene referencias a los workers por
 /// canal y un handle de cancelación.
+#[derive(Debug, Default)]
 pub struct Pipeline {
     // En Fase 1: handles de threads, canales, shutdown flag.
 }
