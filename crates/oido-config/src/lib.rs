@@ -44,7 +44,9 @@ impl Default for Config {
 
 /// Path canónico al directorio de configuración del usuario para Oido.
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("oido")
+    dirs::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("oido")
 }
 
 /// Path al archivo `config.json` final.
@@ -78,6 +80,7 @@ pub struct ConfigStore {
     inner: parking_lot::Mutex<Inner>,
 }
 
+#[derive(Debug)]
 struct Inner {
     config: Config,
     path: PathBuf,
