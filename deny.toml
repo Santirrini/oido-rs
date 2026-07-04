@@ -25,6 +25,7 @@ ignore = [
     "RUSTSEC-2024-0370", # proc-macro-error
 ]kapka
 
+
 [licenses]
 allow = [
     "MIT",
