@@ -8,7 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUSTFLAGS: -D warnings
+  # Sin `RUSTFLAGS: -D warnings` aquí: las advertencias informativas
+  # (`missing_debug_implementations`, pedantic local, etc.) no deben
+  # romper el build. El paso `cargo clippy` abajo niega pedantic + all
+  # de forma explícita.
 
 jobs:
   fmt:
