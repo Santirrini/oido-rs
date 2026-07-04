@@ -97,16 +97,16 @@ impl Transcriber for WhisperCpp {
 
         let mut out = String::new();
         for i in 0..state.full_n_segments() {
-            if let Some(seg) = state.full_get_segment_text(i) {
-                let trimmed = seg.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(trimmed);
+            let Some(seg) = state.get_segment(i) else { continue };
+            let Ok(text) = seg.to_str_lossy() else { continue };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(trimmed);
         }
         Ok(out)
     }
