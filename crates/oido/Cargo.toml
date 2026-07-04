@@ -17,7 +17,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-oido-core = { path = "../oido-core" }
-oido-config = { path = "../oido-config" }
-oido-platform = { path = "../oido-platform" }
-oido-stt = { path = "../oido-stt" }
+oido-core = { path = "../oido-core", version = "0.1.0" }
+oido-config = { path = "../oido-config", version = "0.1.0" }
+oido-platform = { path = "../oido-platform", version = "0.1.0" }
+oido-stt = { path = "../oido-stt", version = "0.1.0" }

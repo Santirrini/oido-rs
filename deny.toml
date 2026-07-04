@@ -28,6 +28,7 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
+multiple-versions = "transitive"
 wildcards = "deny"
 highlight = "all"
 
