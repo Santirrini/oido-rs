@@ -3,6 +3,8 @@
 //! Cada método debe ser `Send + 'static` para que el pipeline los
 //! pueda mover entre threads sin rodeos.
 
+use std::fmt::Debug;
+
 use crossbeam_channel::Sender;
 
 use thiserror::Error;

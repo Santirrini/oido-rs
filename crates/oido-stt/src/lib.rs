@@ -12,6 +12,8 @@ pub mod whisper_cpp;
 
 pub use whisper_cpp::WhisperCpp;
 
+use std::fmt::Debug;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
