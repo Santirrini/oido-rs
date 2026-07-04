@@ -1,5 +1,0 @@
-# nextest config: permite suite vacía en Fase 0 (transición a Fase 1).
-# `no-tests = "warn"` convierte el error "no tests to run" en warning.
-
-[profile.default]
-no-tests = "warn"

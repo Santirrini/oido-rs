@@ -70,7 +70,7 @@ jobs:
         run: cargo install cargo-nextest --locked --version 0.9.95
 
       - name: cargo nextest
-        run: cargo nextest run --workspace --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
 
       - name: cargo doc
         run: cargo doc --workspace --no-deps --quiet
