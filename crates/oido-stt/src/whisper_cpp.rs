@@ -23,7 +23,6 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use super::{SttError, Transcriber};
 
 /// Backend `whisper.cpp`. Es `Send + Sync` porque `WhisperContext` lo es.
-#[derive(Clone)]
 pub struct WhisperCpp {
     ctx: Option<WhisperContext>,
     language: Option<String>,
