@@ -16,13 +16,18 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 
 # Cross-platform OS abstractions. cpal/global-hotkey/arboard/enigo each
-# build on all 3 OS via conditional compilation in their own crates;
-# tray-icon covers Win+macOS, ksni covers Linux only.
+# build on all 3 OS via conditional compilation in their own crates.
 cpal.workspace = true
 global-hotkey.workspace = true
-tray-icon.workspace = true
 arboard.workspace = true
 enigo.workspace = true
+
+# Tray: tray-icon (Win+macOS) vía AppIndicator/NSStatus; ksni (Linux)
+# vía StatusNotifierItem. NO tray-icon en Linux: trae gtk3-rs
+# unmaintained (cargo-deny RUSTSEC-2024-0413..0420) y no es necesario
+# porque ksni es nativo D-Bus.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni.workspace = true
