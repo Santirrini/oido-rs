@@ -61,7 +61,9 @@ mod tests {
         let mut d = Dedup::new();
         assert_eq!(d.process("  hola  "), Some("hola"));
         assert_eq!(d.process("hola"), None);
-        assert_eq!(d.process(" Hola "), None, "case-sensitive igual");
+        // case-sensitive: "Hola" NO es dup de "hola".
+        assert_eq!(d.process(" Hola "), Some("Hola"));
+        assert_eq!(d.process("Hola"), None);
     }
 
     #[test]
