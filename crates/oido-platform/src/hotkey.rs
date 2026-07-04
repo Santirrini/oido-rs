@@ -45,15 +45,11 @@ impl GhHotkey {
 }
 
 impl Hotkey for GhHotkey {
-    fn register<F, G>(
+    fn register(
         &mut self,
-        on_press: F,
-        on_release: G,
-    ) -> Result<(), PlatformError>
-    where
-        F: Fn() + Send + 'static,
-        G: Fn() + Send + 'static,
-    {
+        on_press: Box<dyn Fn() + Send + 'static>,
+        on_release: Box<dyn Fn() + Send + 'static>,
+    ) -> Result<(), PlatformError> {
         // El usuario quiere procesar eventos en su thread; pero
         // `GlobalHotKeyManager::event_handler()` se invoca desde un
         // thread interno del crate, y ese closure debe poder moverse

@@ -49,6 +49,7 @@ impl Tray for PlatformTray {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
 pub struct LinuxTray;
 #[cfg(target_os = "linux")]
 impl LinuxTray {

@@ -23,10 +23,7 @@ use std::thread::{self, JoinHandle};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use oido_platform::{
-    AudioFrame, AudioRx, AudioTx,
-    CaptureSource, Hotkey, Injector,
-};
+use oido_platform::{AudioRx, AudioTx, CaptureSource, Hotkey, Injector};
 use oido_stt::Transcriber;
 
 use crate::dedup::Dedup;
@@ -120,7 +117,7 @@ impl Pipeline {
         // 3) hotkey: cierra el ciclo press → record, release → process.
         let event_tx = self.event_tx.clone();
         let recording_p = Arc::clone(&self.recording);
-        let on_press = move || {
+        let on_press = Box::new(move || {
             let mut s = recording_p.lock();
             if !s.recording {
                 s.recording = true;
@@ -129,13 +126,13 @@ impl Pipeline {
                 drop(s);
                 let _ = event_tx.send(PipelineEvent::State(PipelineState::Recording));
             }
-        };
+        });
 
         let event_tx = self.event_tx.clone();
         let recording_r = Arc::clone(&self.recording);
         let transcriber = Arc::clone(&self.cfg.transcriber);
         let injector = Arc::clone(&self.cfg.injector);
-        let on_release = move || {
+        let on_release = Box::new(move || {
             // 3a) snapshot del buffer + cambio de estado.
             let buffer = {
                 let mut s = recording_r.lock();
@@ -170,7 +167,7 @@ impl Pipeline {
                 tracing::error!(?e, "injector falló");
             }
             let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
-        };
+        });
 
         self.cfg
             .hotkey

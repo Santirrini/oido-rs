@@ -36,12 +36,20 @@ pub trait CaptureSource: Send + 'static {
 }
 
 /// Hotkey global con callback on_press/on_release.
+///
+/// `Box<dyn Fn() + Send>` (no generic) para ser dyn-compatible. La
+/// alternativa era genericizar el Pipeline sobre el tipo de hotkey, lo
+/// cual rebotaba al bin (Pipeline<GhHotkey>). Ponytail: el coste de un
+/// box es 16 bytes + el call virtual; despreciable.
 pub trait Hotkey: Send + 'static {
-    /// Registra la combinación (key code virtual) y conecta callbacks.
-    fn register<F, G>(&mut self, on_press: F, on_release: G) -> Result<(), PlatformError>
-    where
-        F: Fn() + Send + 'static,
-        G: Fn() + Send + 'static;
+    /// Registra la combinación y conecta callbacks boxed. Las
+    /// `Box<dyn Fn() + Send>` son necesarias porque el callback se
+    /// ejecuta en un thread interno del crate subyacente.
+    fn register(
+        &mut self,
+        on_press: Box<dyn Fn() + Send + 'static>,
+        on_release: Box<dyn Fn() + Send + 'static>,
+    ) -> Result<(), PlatformError>;
     fn unregister(&mut self) -> Result<(), PlatformError>;
 }
 
