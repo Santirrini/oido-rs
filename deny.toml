@@ -61,7 +61,6 @@ allow = [
     "GPL-2.0",
     "GPL-3.0",
     "OFL-1.1",
-    "OFL-1.1-no-fontembedding",
 ]
 
 confidence-threshold = 0.5
