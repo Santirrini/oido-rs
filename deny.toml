@@ -4,7 +4,7 @@ no-default-features = false
 
 [advisories]
 version = 2
-unmaintained = "warn"
+unmaintained = "all"
 
 [licenses]
 allow = [

@@ -3,6 +3,7 @@
 
 use crate::traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray, TrayState};
 
+#[derive(Debug)]
 pub struct WindowsCapture;
 impl CaptureSource for WindowsCapture {
     fn start(&mut self) -> Result<(), PlatformError> {
@@ -16,6 +17,7 @@ impl CaptureSource for WindowsCapture {
     }
 }
 
+#[derive(Debug)]
 pub struct WindowsHotkey;
 impl Hotkey for WindowsHotkey {
     fn register<F, G>(&mut self, _: F, _: G) -> Result<(), PlatformError>
@@ -30,6 +32,7 @@ impl Hotkey for WindowsHotkey {
     }
 }
 
+#[derive(Debug)]
 pub struct WindowsTray;
 impl Tray for WindowsTray {
     fn show(&mut self) -> Result<(), PlatformError> {
@@ -43,6 +46,7 @@ impl Tray for WindowsTray {
     }
 }
 
+#[derive(Debug)]
 pub struct WindowsInjector;
 impl Injector for WindowsInjector {
     fn inject(&mut self, _: &str) -> Result<(), PlatformError> {

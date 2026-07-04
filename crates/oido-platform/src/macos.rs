@@ -3,6 +3,7 @@
 
 use crate::traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray, TrayState};
 
+#[derive(Debug)]
 pub struct MacCapture;
 impl CaptureSource for MacCapture {
     fn start(&mut self) -> Result<(), PlatformError> {
@@ -16,6 +17,7 @@ impl CaptureSource for MacCapture {
     }
 }
 
+#[derive(Debug)]
 pub struct MacHotkey;
 impl Hotkey for MacHotkey {
     fn register<F, G>(&mut self, _: F, _: G) -> Result<(), PlatformError>
@@ -30,6 +32,7 @@ impl Hotkey for MacHotkey {
     }
 }
 
+#[derive(Debug)]
 pub struct MacTray;
 impl Tray for MacTray {
     fn show(&mut self) -> Result<(), PlatformError> {
@@ -43,6 +46,7 @@ impl Tray for MacTray {
     }
 }
 
+#[derive(Debug)]
 pub struct MacInjector;
 impl Injector for MacInjector {
     fn inject(&mut self, _: &str) -> Result<(), PlatformError> {

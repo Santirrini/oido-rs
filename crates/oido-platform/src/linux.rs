@@ -2,6 +2,7 @@
 
 use crate::traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray, TrayState};
 
+#[derive(Debug)]
 pub struct LinuxCapture;
 impl CaptureSource for LinuxCapture {
     fn start(&mut self) -> Result<(), PlatformError> {
@@ -15,6 +16,7 @@ impl CaptureSource for LinuxCapture {
     }
 }
 
+#[derive(Debug)]
 pub struct LinuxHotkey;
 impl Hotkey for LinuxHotkey {
     fn register<F, G>(&mut self, _: F, _: G) -> Result<(), PlatformError>
@@ -29,6 +31,7 @@ impl Hotkey for LinuxHotkey {
     }
 }
 
+#[derive(Debug)]
 pub struct LinuxTray;
 impl Tray for LinuxTray {
     fn show(&mut self) -> Result<(), PlatformError> {
@@ -42,6 +45,7 @@ impl Tray for LinuxTray {
     }
 }
 
+#[derive(Debug)]
 pub struct LinuxInjector;
 impl Injector for LinuxInjector {
     fn inject(&mut self, _: &str) -> Result<(), PlatformError> {

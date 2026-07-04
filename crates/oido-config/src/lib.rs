@@ -44,9 +44,7 @@ impl Default for Config {
 
 /// Path canónico al directorio de configuración del usuario para Oido.
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
-        .join("oido")
+    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("oido")
 }
 
 /// Path al archivo `config.json` final.
@@ -75,6 +73,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
 /// `ConfigStore` (Regla R3). Único mutex del workspace. `oido-core`
 /// debe leerlo vía `with`, nunca por dentro de una región crítica
 /// durante un callback de hotkey.
+#[derive(Debug)]
 pub struct ConfigStore {
     inner: parking_lot::Mutex<Inner>,
 }
