@@ -8,6 +8,10 @@
 //!
 //! La impl real (`WhisperCpp`) entra en Fase 1 con `whisper-rs` enlazado.
 
+pub mod whisper_cpp;
+
+pub use whisper_cpp::WhisperCpp;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
