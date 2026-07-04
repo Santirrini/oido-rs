@@ -4,13 +4,19 @@
 //! - `enigo` para la pulsación sintética de Ctrl/Cmd+V en la ventana
 //!   activa (el SO ya controla el foco).
 //!
-//!
 //! macOS aviso: en sandbox el pegado sintético bloquea. Hay que añadir
 //! `enable_transient_cdevent_for_tracking_area` o habilitar el bundle
 //! `osascript` (documentado Fase 5 cuando se firme).
+//!
+//! La impl usa `Arc<parking_lot::Mutex<Inner>>` para que se pueda
+//! llamar a `inject` desde varios threads simultáneamente con `&self`,
+//! respetando la firma del trait `Injector`.
+
+use std::sync::Arc;
 
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use parking_lot::Mutex;
 
 use crate::traits::{Injector, PlatformError};
 
@@ -19,9 +25,13 @@ const MODIFIER: Key = Key::Meta;
 #[cfg(not(target_os = "macos"))]
 const MODIFIER: Key = Key::Control;
 
-pub struct ArboardInjector {
+struct Inner {
     clipboard: Clipboard,
     enigo: Enigo,
+}
+
+pub struct ArboardInjector {
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl std::fmt::Debug for ArboardInjector {
@@ -30,25 +40,23 @@ impl std::fmt::Debug for ArboardInjector {
     }
 }
 
-impl Default for ArboardInjector {
-    fn default() -> Self {
-        Self::new().expect("init arboard+enigo")
-    }
-}
-
 impl ArboardInjector {
-    pub fn new() -> Result<Self, PlatformError> {
+    pub fn new() -> Result<Arc<Self>, PlatformError> {
         let clipboard =
             Clipboard::new().map_err(|e| PlatformError::Inject(format!("clipboard: {e}")))?;
         let enigo = Enigo::new(&Settings::default())
             .map_err(|e| PlatformError::Inject(format!("enigo: {e}")))?;
-        Ok(Self { clipboard, enigo })
+        Ok(Arc::new(Self {
+            inner: Arc::new(Mutex::new(Inner { clipboard, enigo })),
+        }))
     }
 }
 
 impl Injector for ArboardInjector {
-    fn inject(&mut self, text: &str) -> Result<(), PlatformError> {
-        self.clipboard
+    fn inject(&self, text: &str) -> Result<(), PlatformError> {
+        let mut inner = self.inner.lock();
+        inner
+            .clipboard
             .set_text(text.to_owned())
             .map_err(|e| PlatformError::Inject(format!("clipboard set: {e}")))?;
 
@@ -57,16 +65,22 @@ impl Injector for ArboardInjector {
         // races con apps de bajo overhead.
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        self.enigo
+        inner
+            .enigo
+            .key(MODIFIER, Direction::Press)
+            .map_err(|e| PlatformError::Inject(format!("enigo mod press: {e}")))?;
+        inner
+            .enigo
             .key(Key::Unicode('v'), Direction::Press)
             .map_err(|e| PlatformError::Inject(format!("enigo V press: {e}")))?;
-        self.enigo
+        inner
+            .enigo
             .key(Key::Unicode('v'), Direction::Release)
             .map_err(|e| PlatformError::Inject(format!("enigo V release: {e}")))?;
-        self.enigo
+        inner
+            .enigo
             .key(MODIFIER, Direction::Release)
             .map_err(|e| PlatformError::Inject(format!("enigo mod release: {e}")))?;
-
         // Re-press el modificador a "ninguna" semántica: el SO ya está
         // esperando. Si la app destino ignoró V por estado de foco,
         // Fase 1 no lo reintenta (YAGNI retry).

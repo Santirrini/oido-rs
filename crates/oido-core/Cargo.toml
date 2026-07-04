@@ -9,11 +9,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true
+parking_lot.workspace = true
 oido-stt = { path = "../oido-stt", version = "0.1.0" }
 oido-platform = { path = "../oido-platform", version = "0.1.0" }
 oido-config = { path = "../oido-config", version = "0.1.0" }

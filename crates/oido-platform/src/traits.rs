@@ -63,6 +63,11 @@ pub trait Tray: Send + 'static {
 }
 
 /// Inyecta texto vía clipboard + paste simulado (Ctrl/Cmd+V).
-pub trait Injector: Send + 'static {
-    fn inject(&mut self, text: &str) -> Result<(), PlatformError>;
+///
+/// `&self` (interior mut) para poder compartir la misma instancia entre
+/// el thread de release y otros workers si en el futuro hace falta.
+/// Razón: arboard+enigo requieren `&mut` internamente, así que la impl
+/// guarda estado en `Arc<parking_lot::Mutex<Inner>>`.
+pub trait Injector: Send + Sync + 'static {
+    fn inject(&self, text: &str) -> Result<(), PlatformError>;
 }
