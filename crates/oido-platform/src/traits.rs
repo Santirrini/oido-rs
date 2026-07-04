@@ -27,7 +27,7 @@ pub enum PlatformError {
 ///
 /// Lifecycle: `open(sink)` — `start()` — `stop()`. `start`/`stop`
 /// pueden llamarse múltiples veces.
-pub trait CaptureSource: Send + 'static {
+pub trait CaptureSource: Send + Debug + 'static {
     /// Registra el sumidero (canal de audio) donde se publicarán las
     /// muestras. Debe invocarse antes de `start()`.
     fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), PlatformError>;
