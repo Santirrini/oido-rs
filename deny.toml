@@ -6,6 +6,25 @@ no-default-features = false
 version = 2
 unmaintained = "all"
 
+# Ignoramos los RUSTSEC de gtk3-rs y proc-macro-error: ambos llegan
+# como dependencias transitivas de `tray-icon` (que en Linux NO se
+# compila gracias al cfg-gate de oido-platform/Cargo.toml). El
+# problema raíz es gtk3-rs está archivado; lo arreglamos en Fase 8
+# cambiando a gtk4-rs o reemplazando tray-icon por una alternativa
+# pura-Rust para Linux. Mientras tanto, deny los marca por seguridad
+# pero no los consideramos bloqueantes: no son vulnerabilidades, sólo
+# "unmaintained".
+ignore = [
+    "RUSTSEC-2024-0412", # atk
+    "RUSTSEC-2024-0413", # atk
+    "RUSTSEC-2024-0415", # gtk
+    "RUSTSEC-2024-0416", # atk-sys
+    "RUSTSEC-2024-0418", # gdk-sys
+    "RUSTSEC-2024-0419", # gtk3-macros
+    "RUSTSEC-2024-0420", # gtk-sys
+    "RUSTSEC-2024-0370", # proc-macro-error
+]kapka
+
 [licenses]
 allow = [
     "MIT",
