@@ -85,7 +85,9 @@ impl Transcriber for WhisperCpp {
         params.set_print_special(false);
         // Anti-alucinación básica del propio whisper:
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        // v0.16: set_suppress_nst (Non-Speech Tokens), antes
+        // `set_suppress_non_speech_tokens` en v0.14.
+        params.set_suppress_nst(true);
         // Single segment = false: queremos la división natural en frases
         // para aplicar después el `Dedup`.
 
