@@ -79,6 +79,7 @@ impl Tray for LinuxTray {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug)]
 pub struct MacTray;
 #[cfg(target_os = "macos")]
 impl MacTray {
@@ -108,6 +109,7 @@ impl Tray for MacTray {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Debug)]
 pub struct WindowsTray;
 #[cfg(target_os = "windows")]
 impl WindowsTray {

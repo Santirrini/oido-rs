@@ -41,6 +41,7 @@ pub enum PipelineEvent {
     State(PipelineState),
 }
 
+#[derive(Debug)]
 pub struct PipelineConfig {
     pub capture: Box<dyn CaptureSource>,
     pub transcriber: Arc<dyn Transcriber>,
