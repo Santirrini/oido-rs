@@ -56,6 +56,7 @@ struct BufferState {
     dedup: Dedup,
 }
 
+#[derive(Debug)]
 pub struct Pipeline {
     cfg: PipelineConfig,
     recording: Arc<Mutex<BufferState>>,

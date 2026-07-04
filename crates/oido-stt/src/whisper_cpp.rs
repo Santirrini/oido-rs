@@ -23,27 +23,10 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use super::{SttError, Transcriber};
 
 /// Backend `whisper.cpp`. Es `Send + Sync` porque `WhisperContext` lo es.
+#[derive(Debug, Default)]
 pub struct WhisperCpp {
     ctx: Option<WhisperContext>,
     language: Option<String>,
-}
-
-impl std::fmt::Debug for WhisperCpp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WhisperCpp")
-            .field("loaded", &self.ctx.is_some())
-            .field("language", &self.language)
-            .finish()
-    }
-}
-
-impl Default for WhisperCpp {
-    fn default() -> Self {
-        Self {
-            ctx: None,
-            language: None,
-        }
-    }
 }
 
 impl WhisperCpp {
@@ -147,7 +130,7 @@ mod tests {
 
     #[test]
     fn short_audio_returns_audio_too_short() {
-        let mut stt = WhisperCpp::default();
+        let stt = WhisperCpp::default();
         // Cargamos un "modelo" ficticio no es viable aquí sin un .bin
         // real; por tanto sólo ejercitamos la rama de audio corto cuando
         // el ctx esté cargado. Si no hay modelo, ya fallará antes con
