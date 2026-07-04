@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use oido_config::ConfigStore;
 use oido_core::{Pipeline, PipelineConfig, PipelineEvent, PipelineState};
 use oido_platform::{capture::CpalCapture, hotkey::GhHotkey, injector::ArboardInjector};
-use oido_stt::WhisperCpp;
+use oido_stt::{Transcriber, WhisperCpp};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
