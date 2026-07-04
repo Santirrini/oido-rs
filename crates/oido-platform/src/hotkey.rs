@@ -67,17 +67,15 @@ impl Hotkey for GhHotkey {
         // proceso; en Fase 2 gestionamos shutdown explícito.
         std::thread::Builder::new()
             .name("oido-hotkey".into())
-            .spawn(move || {
-                loop {
-                    let evt = match GlobalHotKeyEvent::receiver().recv() {
-                        Ok(e) => e,
-                        Err(_) => return,
-                    };
-                    if evt.state() == HotKeyState::Pressed {
-                        let _ = press_tx.send(());
-                    } else {
-                        let _ = release_tx.send(());
-                    }
+            .spawn(move || loop {
+                let evt = match GlobalHotKeyEvent::receiver().recv() {
+                    Ok(e) => e,
+                    Err(_) => return,
+                };
+                if evt.state() == HotKeyState::Pressed {
+                    let _ = press_tx.send(());
+                } else {
+                    let _ = release_tx.send(());
                 }
             })
             .map_err(|e| PlatformError::Hotkey(format!("spawn hotkey thread: {e}")))?;

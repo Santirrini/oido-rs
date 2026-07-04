@@ -35,16 +35,17 @@ impl std::fmt::Debug for CpalCapture {
 impl CpalCapture {
     pub fn new() -> Result<Self, PlatformError> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| PlatformError::Capture("sin dispositivo de entrada por defecto".into()))?;
+        let device = host.default_input_device().ok_or_else(|| {
+            PlatformError::Capture("sin dispositivo de entrada por defecto".into())
+        })?;
 
         // Buscar 16 kHz mono F32. Iteramos `supported_input_configs`
         // directamente (cpal 0.18 devuelve iterator sin Result-wrap).
         let mut wanted = None;
         if let Ok(supported) = device.supported_input_configs() {
             for cfg in supported {
-                if cfg.channels() == 1 && cfg.sample_format() == cpal::SampleFormat::F32
+                if cfg.channels() == 1
+                    && cfg.sample_format() == cpal::SampleFormat::F32
                     && cfg.contains_rate(16_000)
                 {
                     wanted = cfg.try_with_sample_rate(16_000);
@@ -113,8 +114,7 @@ impl CaptureSource for CpalCapture {
             cpal::SampleFormat::I16 => self.device.build_input_stream(
                 self.stream_config.clone(),
                 move |data: &[i16], _cb| {
-                    let samples: Vec<f32> =
-                        data.iter().map(|&s| f32::from(s) / 32_768.0).collect();
+                    let samples: Vec<f32> = data.iter().map(|&s| f32::from(s) / 32_768.0).collect();
                     let _ = sink.send(AudioFrame {
                         samples,
                         sample_rate_hz: sample_rate,

@@ -97,8 +97,12 @@ impl Transcriber for WhisperCpp {
 
         let mut out = String::new();
         for i in 0..state.full_n_segments() {
-            let Some(seg) = state.get_segment(i) else { continue };
-            let Ok(text) = seg.to_str_lossy() else { continue };
+            let Some(seg) = state.get_segment(i) else {
+                continue;
+            };
+            let Ok(text) = seg.to_str_lossy() else {
+                continue;
+            };
             let trimmed = text.trim();
             if trimmed.is_empty() {
                 continue;
@@ -115,9 +119,9 @@ impl Transcriber for WhisperCpp {
         if !model_path.exists() {
             return Err(SttError::ModelNotFound(model_path.to_path_buf()));
         }
-        let path_str = model_path.to_str().ok_or_else(|| {
-            SttError::Backend(format!("path no UTF-8: {}", model_path.display()))
-        })?;
+        let path_str = model_path
+            .to_str()
+            .ok_or_else(|| SttError::Backend(format!("path no UTF-8: {}", model_path.display())))?;
         let ctx_params = WhisperContextParameters::default();
         let ctx = WhisperContext::new_with_params(path_str, ctx_params)
             .map_err(|e| SttError::Backend(format!("load model: {e}")))?;
@@ -163,7 +167,9 @@ mod tests {
         let mut stt = WhisperCpp::with_language("es");
         stt.load_model(&model).expect("cargar modelo");
         // 1 segundo de silencio + un poco de habla simulada
-        let audio: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.001).sin() * 0.1).collect();
+        let audio: Vec<f32> = (0..16_000)
+            .map(|i| (i as f32 * 0.001).sin() * 0.1)
+            .collect();
         let out = stt.transcribe(&audio);
         eprintln!("smoke output: {out:?}");
         // No assercions duras: lo importante es que el flujo se completa.

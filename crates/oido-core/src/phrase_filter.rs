@@ -27,12 +27,12 @@ pub const FILTER_PHRASES: &[&str] = &[
     // ES
     "gracias por ver",
     "gracias por ver!",
-    "\u{a1}gracias por ver!",   // «¡gracias por ver!»
+    "\u{a1}gracias por ver!", // «¡gracias por ver!»
     "gracias por verlo",
-    "suscr\u{ed}bete",          // «suscríbete»
+    "suscr\u{ed}bete", // «suscríbete»
     "suscribete",
     "no olvides suscribirte",
-    "hasta la pr\u{f3}xima",    // «hasta la próxima»
+    "hasta la pr\u{f3}xima", // «hasta la próxima»
     "hasta la proxima",
     "hasta el pr\u{f3}ximo video",
     "nos vemos en el pr\u{f3}ximo video",
@@ -50,7 +50,11 @@ pub fn is_filtered(text: &str) -> bool {
 /// Devuelve `Some(text)` si debe inyectarse, `None` si es alucinación.
 #[must_use]
 pub fn filter(text: &str) -> Option<&str> {
-    if is_filtered(text) { None } else { Some(text) }
+    if is_filtered(text) {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[cfg(test)]
