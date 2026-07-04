@@ -59,9 +59,9 @@ pub fn config_file() -> PathBuf {
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
     use std::io::Write;
 
-    let dir = path.parent().ok_or_else(|| {
-        ConfigError::Invalid(format!("path sin padre: {}", path.display()))
-    })?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| ConfigError::Invalid(format!("path sin padre: {}", path.display())))?;
     std::fs::create_dir_all(dir)?;
 
     // `NamedTempFile` en el mismo directorio garantiza rename atómico

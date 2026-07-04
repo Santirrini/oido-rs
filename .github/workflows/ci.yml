@@ -61,7 +61,7 @@ jobs:
         run: cargo build --verbose --workspace
 
       - name: cargo clippy (pedantic)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic -D clippy::all
 
       - name: Install nextest
         run: cargo install cargo-nextest --locked --version 0.9.95

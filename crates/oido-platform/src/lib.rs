@@ -11,16 +11,16 @@ pub mod traits;
 
 pub use traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray};
 
-#[cfg(target_os = "windows")]
-pub mod windows;
-#[cfg(target_os = "macos")]
-pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
-
-#[cfg(target_os = "windows")]
-pub use self::windows as current;
 #[cfg(target_os = "macos")]
-pub use self::macos as current;
+pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 #[cfg(target_os = "linux")]
 pub use self::linux as current;
+#[cfg(target_os = "macos")]
+pub use self::macos as current;
+#[cfg(target_os = "windows")]
+pub use self::windows as current;
