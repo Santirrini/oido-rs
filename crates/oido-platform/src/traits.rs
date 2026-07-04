@@ -37,14 +37,15 @@ pub trait CaptureSource: Send + 'static {
 
 /// Hotkey global con callback on_press/on_release.
 ///
-/// `Box<dyn Fn() + Send>` (no generic) para ser dyn-compatible. La
-/// alternativa era genericizar el Pipeline sobre el tipo de hotkey, lo
-/// cual rebotaba al bin (Pipeline<GhHotkey>). Ponytail: el coste de un
-/// box es 16 bytes + el call virtual; despreciable.
-pub trait Hotkey: Send + 'static {
-    /// Registra la combinación y conecta callbacks boxed. Las
-    /// `Box<dyn Fn() + Send>` son necesarias porque el callback se
-    /// ejecuta en un thread interno del crate subyacente.
+/// `Box<dyn Fn() + Send>` (no generic) para ser dyn-compatible.
+///
+/// Ponytail: el requisito de `Send` en el trait crea fricción porque
+/// `global_hotkey::GlobalHotKeyManager` contiene un `*mut c_void`
+/// internamente (!Send en Windows). Como el Hotkey solo se usa
+/// dentro del thread principal del bin, no necesitamos `Send` en el
+/// trait. `Register/inject` ocurre antes de spawnar workers de audio.
+pub trait Hotkey: 'static {
+    /// Registra la combinación y conecta callbacks boxed.
     fn register(
         &mut self,
         on_press: Box<dyn Fn() + Send + 'static>,
