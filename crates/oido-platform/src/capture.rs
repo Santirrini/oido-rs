@@ -6,7 +6,6 @@
 //! whisper.cpp que requiere 16 kHz estricto.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleRate, StreamConfig};
 
 use crossbeam_channel::Sender;
 
@@ -15,7 +14,7 @@ use crate::AudioFrame;
 
 pub struct CpalCapture {
     device: cpal::Device,
-    stream_config: StreamConfig,
+    stream_config: cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     sample_rate: u32,
     sink: Option<Sender<AudioFrame>>,
@@ -40,33 +39,32 @@ impl CpalCapture {
             .default_input_device()
             .ok_or_else(|| PlatformError::Capture("sin dispositivo de entrada por defecto".into()))?;
 
-        // Buscar una config 16 kHz mono F32. Si no, fallback al default.
-        let mut wanted: Option<StreamConfig> = None;
-        let mut sample_format = cpal::SampleFormat::F32;
+        // Buscar 16 kHz mono F32. Iteramos `supported_input_configs`
+        // directamente (cpal 0.18 devuelve iterator sin Result-wrap).
+        let mut wanted = None;
         if let Ok(supported) = device.supported_input_configs() {
-            for cfg in supported.flatten() {
-                if cfg.channels() == 1 && cfg.sample_format() == cpal::SampleFormat::F32 {
-                    if let Ok(picked) = cfg.with_sample_rate(SampleRate(16_000)) {
-                        wanted = Some(picked.config());
-                        sample_format = cpal::SampleFormat::F32;
-                        break;
-                    }
+            for cfg in supported {
+                if cfg.channels() == 1 && cfg.sample_format() == cpal::SampleFormat::F32
+                    && cfg.contains_rate(16_000)
+                {
+                    wanted = cfg.try_with_sample_rate(16_000);
+                    break;
                 }
             }
         }
         let (stream_config, sample_format, sample_rate) = match wanted {
-            Some(c) => (c, cpal::SampleFormat::F32, 16_000),
+            Some(s) => (s.config(), cpal::SampleFormat::F32, 16_000_u32),
             None => {
                 let fallback = device
                     .default_input_config()
                     .map_err(|e| PlatformError::Capture(format!("default_input_config: {e}")))?;
                 tracing::warn!(
                     requested = 16_000,
-                    actual = fallback.sample_rate().0,
+                    actual = fallback.sample_rate(),
                     "dispositivo no soporta 16kHz mono F32; usando default; Fase 2 añade resampler"
                 );
                 let cfg = fallback.config();
-                let rate = fallback.sample_rate().0;
+                let rate = fallback.sample_rate();
                 let fmt = fallback.sample_format();
                 (cfg, fmt, rate)
             }
@@ -102,7 +100,7 @@ impl CaptureSource for CpalCapture {
         // alternativa de abstraer el sample-format.
         let stream = match self.sample_format {
             cpal::SampleFormat::F32 => self.device.build_input_stream(
-                &self.stream_config,
+                self.stream_config.clone(),
                 move |data: &[f32], _cb| {
                     let _ = sink.send(AudioFrame {
                         samples: data.to_vec(),
@@ -113,7 +111,7 @@ impl CaptureSource for CpalCapture {
                 None,
             ),
             cpal::SampleFormat::I16 => self.device.build_input_stream(
-                &self.stream_config,
+                self.stream_config.clone(),
                 move |data: &[i16], _cb| {
                     let samples: Vec<f32> =
                         data.iter().map(|&s| f32::from(s) / 32_768.0).collect();
@@ -126,7 +124,7 @@ impl CaptureSource for CpalCapture {
                 None,
             ),
             cpal::SampleFormat::U16 => self.device.build_input_stream(
-                &self.stream_config,
+                self.stream_config.clone(),
                 move |data: &[u16], _cb| {
                     let samples: Vec<f32> = data
                         .iter()
@@ -177,9 +175,9 @@ impl Default for CpalCapture {
             device: cpal::default_host()
                 .default_input_device()
                 .expect("sin dispositivo"),
-            stream_config: StreamConfig {
+            stream_config: cpal::StreamConfig {
                 channels: 1,
-                sample_rate: SampleRate(16_000),
+                sample_rate: 16_000,
                 buffer_size: cpal::BufferSize::Default,
             },
             sample_format: cpal::SampleFormat::F32,

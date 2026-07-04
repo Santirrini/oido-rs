@@ -53,3 +53,4 @@ pub mod traits;
 pub mod tray;
 
 pub use traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray, TrayState};
+pub use tray::PlatformTray;

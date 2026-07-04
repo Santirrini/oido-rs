@@ -11,120 +11,126 @@
 use crate::traits::{PlatformError, Tray, TrayState};
 
 #[cfg(target_os = "linux")]
-pub use self::linux::LinuxTray as PlatformTray;
+pub struct PlatformTray(LinuxTray);
 #[cfg(target_os = "macos")]
-pub use self::macos::MacTray as PlatformTray;
+pub struct PlatformTray(MacTray);
 #[cfg(target_os = "windows")]
-pub use self::windows::WindowsTray as PlatformTray;
+pub struct PlatformTray(WindowsTray);
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
-
-pub fn new() -> Result<PlatformTray, PlatformError> {
-    PlatformTray::new()
+impl PlatformTray {
+    pub fn new() -> Result<Self, PlatformError> {
+        Ok(Self(Inner::new()?))
+    }
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
-    use super::{PlatformError, Tray, TrayState};
+type Inner = LinuxTray;
+#[cfg(target_os = "macos")]
+type Inner = MacTray;
+#[cfg(target_os = "windows")]
+type Inner = WindowsTray;
 
-    /// SNI vía D-Bus. Fase 1 sólo escribe el título (el icono binario
-    /// requiere asset — Fase 3).
-    pub struct LinuxTray;
-
-    impl LinuxTray {
-        pub fn new() -> Result<Self, PlatformError> {
-            Ok(Self)
-        }
+impl std::fmt::Debug for PlatformTray {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PlatformTray").finish()
     }
+}
 
-    impl Default for LinuxTray {
-        fn default() -> Self {
-            Self
-        }
+impl Tray for PlatformTray {
+    fn show(&mut self) -> Result<(), PlatformError> {
+        self.0.show()
     }
+    fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
+        self.0.set_state(state)
+    }
+    fn hide(&mut self) -> Result<(), PlatformError> {
+        self.0.hide()
+    }
+}
 
-    impl Tray for LinuxTray {
-        fn show(&mut self) -> Result<(), PlatformError> {
-            tracing::warn!("tray-Linux.show() no implementado en MVP");
-            Ok(())
-        }
-        fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
-            tracing::info!(?state, "tray state");
-            Ok(())
-        }
-        fn hide(&mut self) -> Result<(), PlatformError> {
-            Ok(())
-        }
+#[cfg(target_os = "linux")]
+pub struct LinuxTray;
+#[cfg(target_os = "linux")]
+impl LinuxTray {
+    pub fn new() -> Result<Self, PlatformError> {
+        Ok(Self)
+    }
+}
+#[cfg(target_os = "linux")]
+impl Default for LinuxTray {
+    fn default() -> Self {
+        Self
+    }
+}
+#[cfg(target_os = "linux")]
+impl Tray for LinuxTray {
+    fn show(&mut self) -> Result<(), PlatformError> {
+        tracing::warn!("tray-Linux.show() no implementado en MVP");
+        Ok(())
+    }
+    fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
+        tracing::info!(?state, "tray state");
+        Ok(())
+    }
+    fn hide(&mut self) -> Result<(), PlatformError> {
+        Ok(())
     }
 }
 
 #[cfg(target_os = "macos")]
-mod macos {
-    use super::{PlatformError, Tray, TrayState};
-
-    pub struct MacTray;
-
-    impl MacTray {
-        pub fn new() -> Result<Self, PlatformError> {
-            Ok(Self)
-        }
+pub struct MacTray;
+#[cfg(target_os = "macos")]
+impl MacTray {
+    pub fn new() -> Result<Self, PlatformError> {
+        Ok(Self)
     }
-
-    impl Default for MacTray {
-        fn default() -> Self {
-            Self
-        }
+}
+#[cfg(target_os = "macos")]
+impl Default for MacTray {
+    fn default() -> Self {
+        Self
     }
-
-    impl Tray for MacTray {
-        fn show(&mut self) -> Result<(), PlatformError> {
-            tracing::warn!("tray-macOS.show() no implementado en MVP");
-            Ok(())
-        }
-        fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
-            tracing::info!(?state, "tray state");
-            Ok(())
-        }
-        fn hide(&mut self) -> Result<(), PlatformError> {
-            Ok(())
-        }
+}
+#[cfg(target_os = "macos")]
+impl Tray for MacTray {
+    fn show(&mut self) -> Result<(), PlatformError> {
+        tracing::warn!("tray-macOS.show() no implementado en MVP");
+        Ok(())
+    }
+    fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
+        tracing::info!(?state, "tray state");
+        Ok(())
+    }
+    fn hide(&mut self) -> Result<(), PlatformError> {
+        Ok(())
     }
 }
 
 #[cfg(target_os = "windows")]
-mod windows {
-    use super::{PlatformError, Tray, TrayState};
-
-    pub struct WindowsTray;
-
-    impl WindowsTray {
-        pub fn new() -> Result<Self, PlatformError> {
-            Ok(Self)
-        }
+pub struct WindowsTray;
+#[cfg(target_os = "windows")]
+impl WindowsTray {
+    pub fn new() -> Result<Self, PlatformError> {
+        Ok(Self)
     }
-
-    impl Default for WindowsTray {
-        fn default() -> Self {
-            Self
-        }
+}
+#[cfg(target_os = "windows")]
+impl Default for WindowsTray {
+    fn default() -> Self {
+        Self
     }
-
-    impl Tray for WindowsTray {
-        fn show(&mut self) -> Result<(), PlatformError> {
-            tracing::warn!("tray-Windows.show() no implementado en MVP");
-            Ok(())
-        }
-        fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
-            tracing::info!(?state, "tray state");
-            Ok(())
-        }
-        fn hide(&mut self) -> Result<(), PlatformError> {
-            Ok(())
-        }
+}
+#[cfg(target_os = "windows")]
+impl Tray for WindowsTray {
+    fn show(&mut self) -> Result<(), PlatformError> {
+        tracing::warn!("tray-Windows.show() no implementado en MVP");
+        Ok(())
+    }
+    fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError> {
+        tracing::info!(?state, "tray state");
+        Ok(())
+    }
+    fn hide(&mut self) -> Result<(), PlatformError> {
+        Ok(())
     }
 }
