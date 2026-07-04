@@ -101,7 +101,7 @@ impl CaptureSource for CpalCapture {
         // alternativa de abstraer el sample-format.
         let stream = match self.sample_format {
             cpal::SampleFormat::F32 => self.device.build_input_stream(
-                self.stream_config.clone(),
+                self.stream_config,
                 move |data: &[f32], _cb| {
                     let _ = sink.send(AudioFrame {
                         samples: data.to_vec(),
@@ -112,7 +112,7 @@ impl CaptureSource for CpalCapture {
                 None,
             ),
             cpal::SampleFormat::I16 => self.device.build_input_stream(
-                self.stream_config.clone(),
+                self.stream_config,
                 move |data: &[i16], _cb| {
                     let samples: Vec<f32> = data.iter().map(|&s| f32::from(s) / 32_768.0).collect();
                     let _ = sink.send(AudioFrame {
@@ -124,7 +124,7 @@ impl CaptureSource for CpalCapture {
                 None,
             ),
             cpal::SampleFormat::U16 => self.device.build_input_stream(
-                self.stream_config.clone(),
+                self.stream_config,
                 move |data: &[u16], _cb| {
                     let samples: Vec<f32> = data
                         .iter()
