@@ -1,0 +1,23 @@
+[package]
+name = "oido"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "oido"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+oido-core = { path = "../oido-core" }
+oido-config = { path = "../oido-config" }
+oido-platform = { path = "../oido-platform" }
+oido-stt = { path = "../oido-stt" }

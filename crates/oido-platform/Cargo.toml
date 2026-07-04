@@ -1,0 +1,19 @@
+[package]
+name = "oido-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+
+# Las dependencias específicas por OS llegan en Fase 1 (cpal,
+# global-hotkey, tray-icon, ksni, arboard).

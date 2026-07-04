@@ -1,0 +1,29 @@
+target/
+**/*.rs.bk
+*.pdb
+
+# Whisper models (large, downloaded, never committed)
+models/*.bin
+models/*.gguf
+
+# Tauri (entra en Fase 3)
+src-tauri/target/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.fleet/
+.cursor/
+
+# Node (Tauri front, Fase 3)
+node_modules/
+ui/.svelte-kit/
+
+# Toolchain cache
+.cargo/

@@ -1,0 +1,19 @@
+[package]
+name = "oido-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+oido-stt = { path = "../oido-stt" }
+oido-platform = { path = "../oido-platform" }
+oido-config = { path = "../oido-config" }

@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oido-core",
+    "crates/oido-stt",
+    "crates/oido-platform",
+    "crates/oido-config",
+    "crates/oido",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Santirrini/oido-rs"
+authors = ["Jose Diaz"]
+description = "Local-first cross-platform voice dictation, rewrite of Oido in Rust."
+
+[workspace.dependencies]
+# Foundation deps the entire workspace shares. Per-crate Cargo.toml re-uses
+# these via `dep.workspace = true`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+dirs = "5"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+# Stage lock: every member inherits MSRV pinned via workspace.package above.
+
+[workspace.lints.rust]
+# Regla R2: FFI aislado. Solo `oido-stt` puede abrir unsafe_code en su
+# propio `Cargo.toml` con `[lints] unsafe_code = "allow"`.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0

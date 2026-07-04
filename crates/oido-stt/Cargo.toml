@@ -1,0 +1,23 @@
+[package]
+name = "oido-stt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Regla R2: ESTE crate es el único con permiso de usar unsafe. La
+# implementación `whisper_cpp.rs` lo requiere para envolver la FFI.
+# Heredamos el deny de workspace y hacemos override local en el módulo
+# específico vía `#![allow(unsafe_code)]` en `whisper_cpp.rs`.
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# whisper-rs llega en Fase 1 cuando tengamos modelos en disco. Por ahora
+# no se enlaza nada nativo para mantener Fase 0 portable con cero
+# dependencias externas.
