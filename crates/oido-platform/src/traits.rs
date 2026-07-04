@@ -3,7 +3,11 @@
 //! Cada método debe ser `Send + 'static` para que el pipeline los
 //! pueda mover entre threads sin rodeos.
 
+use crossbeam_channel::Sender;
+
 use thiserror::Error;
+
+use crate::AudioFrame;
 
 #[derive(Debug, Error)]
 pub enum PlatformError {
@@ -18,7 +22,13 @@ pub enum PlatformError {
 }
 
 /// Productor de audio PCM mono 16 kHz f32 en bloques.
+///
+/// Lifecycle: `open(sink)` — `start()` — `stop()`. `start`/`stop`
+/// pueden llamarse múltiples veces.
 pub trait CaptureSource: Send + 'static {
+    /// Registra el sumidero (canal de audio) donde se publicarán las
+    /// muestras. Debe invocarse antes de `start()`.
+    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), PlatformError>;
     fn start(&mut self) -> Result<(), PlatformError>;
     fn stop(&mut self) -> Result<(), PlatformError>;
     /// Indica si el dispositivo está abierto y sample-rate aceptable.

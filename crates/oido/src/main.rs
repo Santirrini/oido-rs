@@ -27,8 +27,7 @@ fn main() -> Result<()> {
     );
 
     // Fase 1: levantar pipeline, registrar hotkey, mostrar tray.
-    let _pipeline = oido_core::Pipeline::placeholder();
-    tracing::info!("pipeline placeholder listo. Cerrando hasta Fase 1.");
+    tracing::info!("Fase 1: pipeline, hotkey y tray se montan en otro commit");
 
     Ok(())
 }
