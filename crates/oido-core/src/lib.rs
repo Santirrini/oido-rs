@@ -7,6 +7,9 @@
 
 #![doc = include_str!("../../../ARCHITECTURE.md")]
 
+pub mod dedup;
+pub mod phrase_filter;
+
 use crossbeam_channel::{Receiver, Sender};
 
 /// Frame de audio PCM mono 16 kHz f32.
