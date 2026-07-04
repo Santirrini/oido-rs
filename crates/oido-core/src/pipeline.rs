@@ -49,7 +49,7 @@ pub struct PipelineConfig {
     pub hotkey: Box<dyn Hotkey>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct BufferState {
     samples: Vec<f32>,
     recording: bool,
