@@ -44,7 +44,7 @@ pub trait CaptureSource: Send + 'static {
 /// internamente (!Send en Windows). Como el Hotkey solo se usa
 /// dentro del thread principal del bin, no necesitamos `Send` en el
 /// trait. `Register/inject` ocurre antes de spawnar workers de audio.
-pub trait Hotkey: 'static {
+pub trait Hotkey: Debug + 'static {
     /// Registra la combinación y conecta callbacks boxed.
     fn register(
         &mut self,
@@ -77,6 +77,6 @@ pub trait Tray: Send + 'static {
 /// el thread de release y otros workers si en el futuro hace falta.
 /// Razón: arboard+enigo requieren `&mut` internamente, así que la impl
 /// guarda estado en `Arc<parking_lot::Mutex<Inner>>`.
-pub trait Injector: Send + Sync + 'static {
+pub trait Injector: Send + Sync + Debug + 'static {
     fn inject(&self, text: &str) -> Result<(), PlatformError>;
 }

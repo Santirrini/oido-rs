@@ -26,7 +26,7 @@ pub enum SttError {
 
 /// Backend STT. Tómalo por referencia; los backends deben ser
 /// internamente `Sync` (whisper.cpp lo es).
-pub trait Transcriber: Send + Sync {
+pub trait Transcriber: Send + Sync + std::fmt::Debug {
     /// Transcribe un bloque de audio PCM mono 16 kHz f32. El bloque debe
     /// tener al menos ~0.3 s para que el VAD interno detecte algo.
     fn transcribe(&self, audio: &[f32]) -> Result<String, SttError>;

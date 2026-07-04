@@ -65,8 +65,7 @@ fn main() -> Result<()> {
         .spawn(move || {
             while let Ok(evt) = events.recv() {
                 let PipelineEvent::State(state) = evt;
-                    tracing::info!(?state, "pipeline state");
-                }
+                tracing::info!(?state, "pipeline state");
             }
         })?;
 
