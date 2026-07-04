@@ -179,18 +179,13 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Para el pipeline: para la captura, desregistra el hotkey, join
-    /// del consumer.
+    /// Para el pipeline: para la captura, desregistra el hotkey.
+    /// El consumer thread abandona al final del programa, no lo
+    /// bloqueamos aquí (el recv termina cuando cpal libera su clon
+    /// del Sender al destruir su `Stream`).
     pub fn shutdown(&mut self) -> anyhow::Result<()> {
         let _ = self.cfg.capture.stop();
         let _ = self.cfg.hotkey.unregister();
-        // al soltar audio_tx (en este método, su clon se queda en cpal
-        // stream); soltar el original cierra el canal si nadie más lo
-        // mantiene.
-        drop(self.audio_tx.take());
-        if let Some(h) = self.consumer.take() {
-            let _ = h.join();
-        }
         Ok(())
     }
 }

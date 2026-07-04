@@ -7,9 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use oido_config::ConfigStore;
 use oido_core::{Pipeline, PipelineConfig, PipelineEvent, PipelineState};
-use oido_platform::{
-    capture::CpalCapture, hotkey::GhHotkey, injector::ArboardInjector, TrayState,
-};
+use oido_platform::{capture::CpalCapture, hotkey::GhHotkey, injector::ArboardInjector};
 use oido_stt::WhisperCpp;
 use tracing_subscriber::EnvFilter;
 
