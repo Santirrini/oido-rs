@@ -4,9 +4,34 @@ Rewrite of [Oido](https://github.com/Santirrini/Oido) in Rust. Local-first,
 cross-platform voice dictation: hold a hotkey, speak, release, text appears at
 the cursor.
 
-**Status:** Fase 0 (bootstrap). The workspace compiles on Windows, macOS and
-Linux but no feature is implemented yet. See `plans/PLAN.md` for the full
-roadmap.
+**Status:** Fase 1 (MVP dicta+pega, en progreso). El pipeline core funciona
+sobre traits mocks (`crates/oido-core/tests/pipeline_e2e.rs`); el bin real
+compila y queda a la espera de un modelo ggml para STT real. Ver
+`plans/PLAN.md` para el roadmap completo.
+
+## Quick start (4 pasos desde clonar)
+
+```sh
+# 1. Toolchain y deps de sistema (ver sección Prereqs más abajo).
+rustup show                                       # >= 1.85
+
+# 2. Compilar (tarda la primera vez por whisper.cpp).
+cargo build --release
+
+# 3. Bajar el modelo STT (~140 MB para ggml-base.bin).
+#    Windows (PowerShell):
+.\scripts\download_model.ps1
+#    macOS / Linux:
+./scripts/download_model.sh
+
+# 4. Correr. Mantené F8, dictá, soltá. Ctrl+C para salir.
+cargo run --release -p oido
+```
+
+El modelo se guarda bajo `%APPDATA%\oido\models\` (Win) o
+`~/.local/share/oido/models/` (Linux) o
+`~/Library/Application Support/oido/models/` (macOS). Override con la env
+var `OIDO_MODELS_DIR` o pasale `-TargetDir` / primer argumento al script.
 
 ## Goals
 
@@ -69,23 +94,38 @@ Cross-compile a las 4 targets de la CI matrix (ver
 
 ## Verifications
 
+Las 5 puertas que la CI corre en cada push. Las primeras 4 andan sin
+`nextest` instalado; la quinta necesita `cargo install cargo-nextest --locked`.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-cargo deny check
+cargo test --workspace                 # ó cargo nextest run --workspace
+cargo deny check                       # ó cargo install cargo-deny --locked
 cargo doc --workspace --no-deps
 ```
+
+Cobertura actual de tests:
+
+- Unit: `oido-core` (dedup, phrase_filter), `oido-stt` (whisper_cpp
+  ramas de error), `oido-config` (atomic_write + Config roundtrip
+  con proptest).
+- Integration: `crates/oido-core/tests/pipeline_e2e.rs` ejercita el
+  pipeline completo con mocks para `CaptureSource`/`Hotkey`/
+  `Transcriber`/`Injector` — no necesita audio ni modelo.
+- FFI whisper: smoke test marcado `#[ignore]`; activalo con
+  `cargo test -p oido-stt -- --ignored` cuando tengas
+  `models/ggml-base.bin`.
 
 ## Status per fase
 
 | Fase | Estado            | Entregable                                       |
 |------|-------------------|--------------------------------------------------|
 | 0    | ✅ scaffold       | workspace compila 3 OS, CI verde                 |
-| 1    | ⏳ no iniciado    | MVP dicta+pega + tray 3 estados                  |
+| 1    | ✅ core           | MVP dicta+pega + tray stub; pipeline con mocks   |
 | 2    | ⏳                | hotkey configurable, reload config               |
 | 3    | ⏳                | Tauri panel + wizard + i18n ES/EN                |
-| 4    | ⏳                | Model downloader                                  |
+| 4    | ⏳                | Model downloader (scripts de Fase 1 como base)   |
 | 5    | ⏳                | Auto-update + signing                            |
 | 6    | ⏳ (condicional)  | Translation popup                                |
 | 7    | ⏳                | Accesibilidad WCAG 2.1 AA                        |

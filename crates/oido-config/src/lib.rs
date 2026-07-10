@@ -25,7 +25,7 @@ pub enum ConfigError {
 }
 
 /// Estructura serializable. Los defaults viven en `Config::default()`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub hotkey: String,
     pub model: String,
@@ -116,5 +116,126 @@ impl ConfigStore {
         let bytes = serde_json::to_vec_pretty(&cfg)?;
         let path = self.inner.lock().path.clone();
         atomic_write(&path, &bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    impl proptest::arbitrary::Arbitrary for Config {
+        type Parameters = ();
+        type Strategy = proptest::strategy::BoxedStrategy<Self>;
+        fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
+            (any::<String>(), any::<String>(), any::<String>())
+                .prop_map(|(hotkey, model, language_ui)| Self {
+                    hotkey,
+                    model,
+                    language_ui,
+                })
+                .boxed()
+        }
+    }
+
+    #[test]
+    fn default_config_has_sensible_values() {
+        let cfg = Config::default();
+        assert_eq!(cfg.hotkey, "F8");
+        assert_eq!(cfg.model, "ggml-base.bin");
+        assert_eq!(cfg.language_ui, "es");
+    }
+
+    #[test]
+    fn atomic_write_creates_file_with_expected_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        atomic_write(&path, b"{\"hotkey\":\"F9\"}").unwrap();
+        let read = std::fs::read(&path).unwrap();
+        assert_eq!(read, b"{\"hotkey\":\"F9\"}");
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        atomic_write(&path, b"old").unwrap();
+        atomic_write(&path, b"new").unwrap();
+        let read = std::fs::read(&path).unwrap();
+        assert_eq!(read, b"new");
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        atomic_write(&path, b"hello").unwrap();
+        // Sólo el archivo final debe existir; ningún `tmp*` colgado.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["config.json".to_string()]);
+    }
+
+    #[test]
+    fn atomic_write_fails_when_parent_is_a_file() {
+        // Path cuyo "padre" existe como archivo regular, no como
+        // directorio. `create_dir_all` rechaza crear un dir donde ya
+        // hay un file con ese nombre.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"soy un archivo").unwrap();
+        let bogus = blocker.join("config.json");
+        let res = atomic_write(&bogus, b"x");
+        assert!(res.is_err(), "path con padre-archivo debe fallar");
+    }
+
+    #[test]
+    fn config_store_replace_then_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore {
+            inner: parking_lot::Mutex::new(Inner {
+                config: Config::default(),
+                path: path.clone(),
+            }),
+        };
+        let new_cfg = Config {
+            hotkey: "Ctrl+Shift+D".into(),
+            ..Config::default()
+        };
+        store.replace(new_cfg.clone());
+        assert_eq!(store.snapshot().hotkey, "Ctrl+Shift+D");
+    }
+
+    #[test]
+    fn config_store_save_then_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore {
+            inner: parking_lot::Mutex::new(Inner {
+                config: Config::default(),
+                path: path.clone(),
+            }),
+        };
+        store.save().unwrap();
+        // Releer manualmente (no usamos load_or_default porque ese mira
+        // el path global del usuario).
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: Config = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed, Config::default());
+    }
+
+    proptest! {
+        /// Cualquier `Config` arbitrario sobrevive un roundtrip
+        /// serde_json → bytes → serde_json (Regla: ningún campo se
+        /// pierde ni se transforma).
+        #[test]
+        fn config_serde_roundtrip(cfg in any::<Config>()) {
+            let bytes = serde_json::to_vec(&cfg).unwrap();
+            let back: Config = serde_json::from_slice(&bytes).unwrap();
+            prop_assert_eq!(cfg, back);
+        }
     }
 }

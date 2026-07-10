@@ -32,6 +32,11 @@ dirs = "5"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
+# Dev-only: property-based testing (config roundtrip, etc.).
+proptest = "1"
+# Ctrl+C cross-platform (Windows: SetConsoleCtrlHandler, Unix: signal).
+ctrlc = "3"
+
 # Fase 1: native SDK crates. Pinned a majors actuales (cargo resolver
 # elige parche mayor). Si una versión mayor causa rotura, fijar y
 # comentar abajo.

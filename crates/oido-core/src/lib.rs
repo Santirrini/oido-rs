@@ -1,8 +1,8 @@
 //! Orquestación del pipeline de dictado: conecta
 //! `CaptureSource → Transcriber → Filtro (dedup + frase) → Injector`
 //! vía `crossbeam::channel`. Sin estado mutable compartido entre etapas.
-
-#![doc = include_str!("../../../ARCHITECTURE.md")]
+//!
+//! Arquitectura detallada: [`ARCHITECTURE.md`](https://github.com/Santirrini/oido-rs/blob/main/ARCHITECTURE.md).
 
 pub mod dedup;
 pub mod phrase_filter;

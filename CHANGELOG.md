@@ -1,5 +1,54 @@
 # Changelog
 
+## Fase 1 - MVP dicta+pega (en curso)
+
+**Fecha:** 2026-07-09
+
+### Pipeline y tests
+
+- `crates/oido-core/tests/pipeline_e2e.rs` — 7 integration tests con
+  `MockCapture` / `MockHotkey` / `MockTranscriber` / `MockInjector` que
+  ejercitan el flujo press → STT → filtro → inyección sin OS.
+- `crates/oido-config/src/lib.rs` — `+8 tests` unitarios para
+  `atomic_write` y `ConfigStore`; property-based roundtrip con
+  `proptest` para `Config`.
+- `oido-config`: agregado `PartialEq + Eq + proptest::Arbitrary` para
+  `Config`.
+- Removido `#![doc = include_str!("../../../ARCHITECTURE.md")]` de
+  `oido-core/src/lib.rs` — causaba 7 doctests rotos por bloques de
+  Rust en ARCHITECTURE.md referenciando tipos no definidos.
+
+### Bin `oido`
+
+- Handler de Ctrl+C (`ctrlc = "3"`): shutdown limpio al recibir señal.
+- Resolución del directorio de modelos:
+  `OIDO_MODELS_DIR` env var → `dirs::data_dir()/oido/models` →
+  fallback relativo `models/`.
+- Tray cableado al observer thread: `PlatformTray::set_state` se
+  invoca en cada `PipelineEvent::State`. Tray stub en MVP (sólo
+  loggea); el cableado queda listo para Fase 3.
+
+### Scripts
+
+- `scripts/download_model.ps1` (Windows) y `scripts/download_model.sh`
+  (macOS/Linux) bajan `ggml-base.bin` desde
+  `huggingface.co/ggerganov/whisper.cpp` al directorio de modelos de
+  la app.
+
+### Dependencias nuevas
+
+- `proptest = "1"` (workspace dev-dep; sólo lo usa `oido-config` por
+  ahora).
+- `ctrlc = "3"` (workspace dep; sólo lo usa el bin `oido`).
+- `parking_lot` y `dirs` agregados como deps directas del bin `oido`
+  (antes venían transitivas).
+
+### CI / verificaciones locales
+
+27 tests passing + 1 ignored (smoke E2E whisper con modelo real).
+`cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`
+y `cargo test --workspace` limpios.
+
 ## Fase 0 - Bootstrap CERRADA
 
 **Fecha:** 2026-07-03 a 2026-07-04
