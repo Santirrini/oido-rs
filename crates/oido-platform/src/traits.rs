@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use oido_config::Theme;
 
+use crate::tray::sections::MenuSection;
 use crate::AudioFrame;
 
 #[derive(Debug, Error)]
@@ -89,6 +90,10 @@ pub enum MenuAction {
     CheckUpdates,
     TogglePause,
     Exit,
+    /// Click sobre un item del submenú "Modelos". El `String` es el
+    /// filename del modelo (p.ej. `"ggml-base.bin"`). El dispatch en el
+    /// bin decide si el modelo está instalado (activar) o no (descargar).
+    ModelItem(String),
 }
 
 pub trait Tray: 'static {
@@ -98,6 +103,10 @@ pub trait Tray: 'static {
     fn hide(&mut self) -> Result<(), PlatformError>;
     /// Devuelve el receptor de acciones de menú (solo la primera llamada devuelve `Some`).
     fn take_menu_events(&mut self) -> Option<Receiver<MenuAction>>;
+    /// Reconstruye el árbol de menú con las secciones dadas y lo
+    /// re-adjunta al icono. Necesario para refrescar el submenú "Modelos"
+    /// después de una descarga o cambio de modelo activo.
+    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), PlatformError>;
 }
 
 /// Inyecta texto vía clipboard + paste simulado (Ctrl/Cmd+V).

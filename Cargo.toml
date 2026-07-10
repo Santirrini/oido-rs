@@ -5,6 +5,7 @@ members = [
     "crates/oido-stt",
     "crates/oido-platform",
     "crates/oido-config",
+    "crates/oido-models",
     "crates/oido",
 ]
 
@@ -36,6 +37,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 proptest = "1"
 # Ctrl+C cross-platform (Windows: SetConsoleCtrlHandler, Unix: signal).
 ctrlc = "3"
+
+# HTTP client para descarga de modelos desde HuggingFace.
+# `default-features = false` evita OpenSSL/Schannel nativo; `rustls-tls` es
+# puro Rust. `blocking` permite descargar desde un thread dedicado sin
+# levantar un runtime async.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
+# SHA-256 para verificar integridad de los `.bin` descargados.
+sha2 = "0.10"
+# Encoding hex para serializar el digest de SHA256.
+hex = "0.4"
+# Mock HTTP server para tests de descarga en `oido-models`.
+httpmock = "0.7"
 
 # CLI argument parsing.
 clap = { version = "4", features = ["derive", "wrap_help"] }

@@ -106,6 +106,37 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
 }
 
+/// Path canónico al directorio donde Oido guarda los modelos descargados.
+///
+/// Resolución:
+/// 1. Variable de entorno `OIDO_MODELS_DIR` (escape hatch para tests y CI).
+/// 2. `dirs::data_dir()/oido/models` (Win: `%APPDATA%/oido/models`,
+///    mac: `~/Library/Application Support/oido/models`,
+///    Linux: `~/.local/share/oido/models`).
+/// 3. Fallback relativo `models/` en el cwd si data_dir falla.
+///
+/// Crea el directorio si no existe (no falla si ya existe). Esta función
+/// es la fuente única de verdad — el bin `oido` y la crate `oido-models`
+/// la consumen directamente.
+pub fn models_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OIDO_MODELS_DIR") {
+        return PathBuf::from(dir);
+    }
+    let dir = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("oido")
+        .join("models");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            ?e,
+            path = %dir.display(),
+            "no se pudo crear el directorio de modelos; usando fallback relativo"
+        );
+        return PathBuf::from("models");
+    }
+    dir
+}
+
 /// Escribe contenido en `path` atómicamente. Crashtear a mitad de
 /// escritura nunca corrompe el archivo destino.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
@@ -332,5 +363,18 @@ mod tests {
             let back: Config = serde_json::from_slice(&bytes).unwrap();
             prop_assert_eq!(cfg, back);
         }
+    }
+
+    #[test]
+    fn models_dir_creates_data_dir_if_missing() {
+        // No podemos setear OIDO_MODELS_DIR (unsafe denegado por lint),
+        // pero podemos verificar que la función devuelve un directorio
+        // que existe y termina en "oido/models".
+        let dir = models_dir();
+        assert!(dir.is_dir(), "models_dir debe crear el directorio: {dir:?}");
+        assert!(
+            dir.ends_with("models"),
+            "models_dir debe terminar en 'models': {dir:?}"
+        );
     }
 }

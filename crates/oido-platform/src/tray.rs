@@ -23,8 +23,11 @@
 pub mod sections;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use oido_config::Theme;
+use parking_lot::Mutex;
 use tray_icon::menu::MenuId;
 
 use crate::icon;
@@ -44,8 +47,11 @@ pub struct PlatformTray(MacTray);
 pub struct PlatformTray(WindowsTray);
 
 impl PlatformTray {
-    pub fn new() -> Result<Self, PlatformError> {
-        Ok(Self(Inner::new(default_sections())?))
+    pub fn new(models_dir: PathBuf, active_model: String) -> Result<Self, PlatformError> {
+        Ok(Self(Inner::new(default_sections(
+            models_dir,
+            active_model,
+        ))?))
     }
 
     /// Construye el tray con un set de secciones declarativo. El
@@ -82,6 +88,9 @@ impl Tray for PlatformTray {
     }
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
         self.0.take_menu_events()
+    }
+    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), PlatformError> {
+        self.0.rebuild_menu(sections)
     }
 }
 
@@ -225,6 +234,10 @@ impl Tray for MacTray {
 pub struct WindowsTray {
     icon: tray_icon::TrayIcon,
     receiver: Option<crossbeam_channel::Receiver<MenuAction>>,
+    /// Compartido con el forwarder de eventos. Se reemplaza atómicamente
+    /// en cada `rebuild_menu` para que los nuevos items del menú sean
+    /// visibles inmediatamente.
+    id_map: SharedIdMap,
 }
 
 #[cfg(target_os = "windows")]
@@ -249,11 +262,12 @@ impl WindowsTray {
             .build()
             .map_err(|e| PlatformError::Tray(e.to_string()))?;
 
-        spawn_event_forwarder(id_map, sender);
+        spawn_event_forwarder(Arc::clone(&id_map), sender);
 
         Ok(Self {
             icon,
             receiver: Some(receiver),
+            id_map,
         })
     }
 }
@@ -282,6 +296,31 @@ impl Tray for WindowsTray {
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
         self.receiver.take()
     }
+    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), PlatformError> {
+        let (menu, new_id_map) = build_menu_from_sections(&sections);
+        // Sustituye el menú nativo adjunto al icono. En tray-icon 0.24
+        // `set_menu` no retorna Result en Windows; en macOS sí. Manejamos
+        // ambas variantes vía una sola rama condicional.
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(e) = self.icon.set_menu(Some(Box::new(menu))) {
+                return Err(PlatformError::Tray(format!("set_menu: {e}")));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.icon.set_menu(Some(Box::new(menu)));
+        }
+        // Reemplaza el id_map atómicamente; el forwarder leerá la
+        // versión nueva a partir del próximo evento.
+        let replacement = Arc::try_unwrap(new_id_map)
+            .map(|m| m.into_inner())
+            .unwrap_or_else(|arc| MenuIdMap {
+                id_to_spec_id: arc.lock().id_to_spec_id.clone(),
+            });
+        *self.id_map.lock() = replacement;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -304,8 +343,14 @@ fn state_tooltip(state: TrayState) -> String {
 struct MenuIdMap {
     /// Map del `MenuId` nativo al id canónico del spec. El forwarder
     /// consulta `id_to_action` para producir el `MenuAction`.
-    id_to_spec_id: HashMap<MenuId, &'static str>,
+    id_to_spec_id: HashMap<MenuId, String>,
 }
+
+/// Tipo del id_map compartido entre el thread del tray y el forwarder
+/// de eventos. Se envuelve en `Arc<Mutex<…>>` para que `rebuild_menu`
+/// pueda reemplazarlo atómicamente sin cerrar el channel de eventos.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+type SharedIdMap = Arc<Mutex<MenuIdMap>>;
 
 /// Construye el menú nativo de bandeja iterando sobre las secciones
 /// declarativas. Produce el MISMO árbol que el `build_menu` original
@@ -315,11 +360,11 @@ struct MenuIdMap {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn build_menu_from_sections(
     sections: &[Box<dyn MenuSection>],
-) -> (tray_icon::menu::Menu, MenuIdMap) {
+) -> (tray_icon::menu::Menu, SharedIdMap) {
     use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 
     let menu = Menu::new();
-    let mut id_to_spec_id: HashMap<MenuId, &'static str> = HashMap::new();
+    let mut id_to_spec_id: HashMap<MenuId, String> = HashMap::new();
 
     // Título + separador inicial (idéntico al original).
     let title = MenuItem::new("oido 2.0", false, None);
@@ -341,12 +386,8 @@ fn build_menu_from_sections(
         }
     }
 
-    (
-        menu,
-        MenuIdMap {
-            id_to_spec_id,
-        },
-    )
+    let id_map = Arc::new(Mutex::new(MenuIdMap { id_to_spec_id }));
+    (menu, id_map)
 }
 
 /// Helper recursivo: añade un `Section` al menú nativo y registra su
@@ -357,7 +398,7 @@ fn build_menu_from_sections(
 fn append_section(
     menu: &tray_icon::menu::Menu,
     section: Section,
-    id_to_spec_id: &mut HashMap<MenuId, &'static str>,
+    id_to_spec_id: &mut HashMap<MenuId, String>,
 ) {
     use tray_icon::menu::{MenuItem, PredefinedMenuItem, Submenu};
 
@@ -383,20 +424,20 @@ fn append_section(
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn spawn_event_forwarder(id_map: MenuIdMap, sender: crossbeam_channel::Sender<MenuAction>) {
+fn spawn_event_forwarder(id_map: SharedIdMap, sender: crossbeam_channel::Sender<MenuAction>) {
     use tray_icon::menu::MenuEvent;
 
     std::thread::spawn(move || {
         let menu_channel = MenuEvent::receiver();
         while let Ok(event) = menu_channel.recv() {
             // Resolver MenuId → spec_id (estático) → MenuAction.
-            // Si el spec_id no está mapeado (no debería pasar con el
-            // árbol declarativo actual), el evento se ignora y se
-            // loguea. Esto evita el `match` con 9 ramas que tenía la
-            // versión anterior: ahora cualquier nuevo item solo
-            // requiere actualizar `id_to_action` en `sections.rs`.
-            if let Some(&spec_id) = id_map.id_to_spec_id.get(&event.id) {
-                if let Some(action) = id_to_action(spec_id) {
+            // Clonamos la vista bajo lock para minimizar hold time.
+            let spec_id_opt = {
+                let guard = id_map.lock();
+                guard.id_to_spec_id.get(&event.id).cloned()
+            };
+            if let Some(spec_id) = spec_id_opt {
+                if let Some(action) = id_to_action(&spec_id) {
                     let _ = sender.send(action);
                 } else {
                     tracing::warn!(

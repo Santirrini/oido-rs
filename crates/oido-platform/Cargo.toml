@@ -16,6 +16,7 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 oido-config = { path = "../oido-config", version = "0.1.0" }
 oido-stt = { path = "../oido-stt", version = "0.1.0" }
+oido-models = { path = "../oido-models", version = "0.1.0" }
 dark-light.workspace = true
 
 # Cross-platform OS abstractions. cpal/global-hotkey/arboard/enigo each
@@ -40,3 +41,6 @@ muda.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -45,6 +45,7 @@ struct Cli {
 }
 
 /// Mensajes de control internos para el ciclo de vida del hilo principal.
+#[allow(dead_code)] // ActivateModel se construye desde el thread `oido-downloader`.
 enum ControlMessage {
     ChangeHotkey,
     HotkeyChanged(Result<String, String>),
@@ -52,26 +53,20 @@ enum ControlMessage {
     SetTheme(Theme),
     SetSttMode(oido_config::SttMode),
     Exit,
+    /// Reconstruye el submenú "Modelos" con el estado actual del disco.
+    /// Se envía tras una descarga o tras activar un modelo distinto,
+    /// para que las marcas ✓/↓ y ← activo reflejen la realidad.
+    RefreshMenu,
+    /// Activa un modelo descargado (filename) en el transcriber activo.
+    /// Idempotente; el bin ya reemplaza el modelo en el SharedTranscriber.
+    ActivateModel(String),
 }
 
 /// Resuelve el directorio donde vive el modelo whisper.
+/// Delegado a `oido_config::models_dir` (única fuente de verdad del
+/// workspace; `oido_models` también la consume).
 fn resolve_models_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("OIDO_MODELS_DIR") {
-        return PathBuf::from(dir);
-    }
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("oido")
-        .join("models");
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        tracing::warn!(
-            ?e,
-            ?data_dir,
-            "no pude crear dir de modelos bajo data_dir; fallback a relativo `models/`"
-        );
-        return PathBuf::from("models");
-    }
-    data_dir
+    oido_config::models_dir()
 }
 
 /// Nombre del archivo del modelo Silero-VAD (formato GGML, requerido
@@ -148,6 +143,130 @@ fn resolve_vad_model_path(models_dir: &Path) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Maneja el click sobre un item del submenú "Modelos".
+///
+/// - Si el modelo ya está instalado: lo activa (snapshot → replace → save →
+///   load_model + warm_up sobre el SharedTranscriber) y refresca el menú
+///   para que aparezca `← activo`.
+/// - Si no está instalado: lanza un thread dedicado `oido-downloader` que
+///   descarga, verifica, y al terminar envía `RefreshMenu` +
+///   `ActivateModel(filename)` + `SetTrayState(Idle)`.
+///
+/// Esta función es la única autorizada a tocar el transcriber desde el
+/// lado del menú (regla R1: comunicación por canales).
+fn handle_model_click(
+    filename: &str,
+    control_tx: &crossbeam_channel::Sender<ControlMessage>,
+    cfg: &Arc<oido_config::ConfigStore>,
+    shared: Option<&Arc<oido_stt::SharedTranscriber>>,
+) {
+    let models_dir = resolve_models_dir();
+    let mp = models_dir.join(filename);
+
+    if mp.is_file() {
+        // Activar directamente.
+        let mut snap = cfg.snapshot();
+        if snap.model != filename {
+            snap.model = filename.to_string();
+            cfg.replace(snap.clone());
+            if let Err(e) = cfg.save() {
+                tracing::error!(?e, "no se pudo guardar config tras activar modelo");
+                return;
+            }
+            tracing::info!(model = %filename, "modelo activo actualizado");
+        }
+        // Recargar el modelo en el SharedTranscriber (si existe).
+        if let Some(shared) = shared {
+            let handle = shared.handle();
+            let load_res = handle.lock().load_model(&mp);
+            match load_res {
+                Ok(()) => {
+                    let _ = handle.lock().warm_up();
+                }
+                Err(e) => {
+                    tracing::error!(?e, "load_model falló al activar {filename}");
+                    let _ = control_tx.send(ControlMessage::SetTrayState(TrayState::Error));
+                    return;
+                }
+            }
+        }
+        // Refrescar el menú para mover la marca ← activo.
+        let _ = control_tx.send(ControlMessage::RefreshMenu);
+    } else {
+        // Buscar el entry en el catálogo para obtener URL/tamaño.
+        let entry = oido_models::find(filename).cloned();
+        let Some(entry) = entry else {
+            tracing::warn!(filename, "click sobre modelo no presente en catálogo");
+            return;
+        };
+        // Marcar "descargando" en la bandeja.
+        let _ = control_tx.send(ControlMessage::SetTrayState(TrayState::Loading));
+        let tx = control_tx.clone();
+        let dir = models_dir.clone();
+        let shared_for_dl = shared.map(Arc::clone);
+        let cfg_for_dl = Arc::clone(cfg);
+        let span = tracing::info_span!("download_model_user", filename = %filename);
+        let _ = thread::Builder::new()
+            .name("oido-downloader".into())
+            .spawn(move || {
+                let _enter = span.enter();
+                match oido_models::download_model(&dir, &entry, None) {
+                    Ok(()) => {
+                        tracing::info!(filename = %entry.filename, "descarga completa");
+                        // Refrescar menú para reflejar ✓ en el item.
+                        let _ = tx.send(ControlMessage::RefreshMenu);
+                        // Activar el modelo recién descargado.
+                        activate_after_download(
+                            &entry.filename,
+                            &dir,
+                            &cfg_for_dl,
+                            shared_for_dl.as_ref(),
+                            &tx,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            ?e,
+                            filename = %entry.filename,
+                            "descarga falló"
+                        );
+                        let _ = tx.send(ControlMessage::SetTrayState(TrayState::Error));
+                    }
+                }
+            });
+    }
+}
+
+/// Helper: activa un modelo recién descargado (espejo de la rama "ya
+/// instalado" de `handle_model_click`, pero separado para mantener el
+/// thread del downloader minimalista).
+fn activate_after_download(
+    filename: &str,
+    models_dir: &Path,
+    cfg: &Arc<oido_config::ConfigStore>,
+    shared: Option<&Arc<oido_stt::SharedTranscriber>>,
+    control_tx: &crossbeam_channel::Sender<ControlMessage>,
+) {
+    let mut snap = cfg.snapshot();
+    snap.model = filename.to_string();
+    cfg.replace(snap.clone());
+    if let Err(e) = cfg.save() {
+        tracing::error!(?e, "no se pudo guardar config tras descarga");
+    }
+    let mp = models_dir.join(filename);
+    if let Some(shared) = shared {
+        let handle = shared.handle();
+        if let Err(e) = handle.lock().load_model(&mp) {
+            tracing::error!(?e, "load_model falló tras descarga");
+            let _ = control_tx.send(ControlMessage::SetTrayState(TrayState::Error));
+            return;
+        }
+        let _ = handle.lock().warm_up();
+    }
+    let _ = control_tx.send(ControlMessage::SetTrayState(TrayState::Idle));
+    tracing::info!(filename, "modelo activado tras descarga");
 }
 
 /// Formatea la configuración activa en una tabla elegante usando caracteres Unicode.
@@ -378,7 +497,7 @@ fn main() -> Result<()> {
     // que añadir una sección, basta con sumar un struct que implemente
     // `MenuSection` y agregarlo a la lista — `tray.rs::build_menu`
     // deja de tocar.
-    let mut tray = PlatformTray::new().ok();
+    let mut tray = PlatformTray::new(models_dir.clone(), snap.model.clone()).ok();
     let menu_rx = tray.as_mut().and_then(|t| t.take_menu_events());
     tracing::info!(
         phase = "tray_init",
@@ -482,6 +601,8 @@ fn main() -> Result<()> {
     // Hilo oido-menu-listener
     if let Some(rx) = menu_rx {
         let control_tx_for_menu = control_tx.clone();
+        let cfg_for_menu = Arc::clone(&cfg);
+        let shared_for_menu = shared_transcriber.as_ref().map(Arc::clone);
         thread::Builder::new()
             .name("oido-menu-listener".into())
             .spawn(move || {
@@ -501,6 +622,14 @@ fn main() -> Result<()> {
                             if let Err(e) = open::that(&models_dir) {
                                 tracing::error!(?e, "no se pudo abrir el directorio de modelos");
                             }
+                        }
+                        MenuAction::ModelItem(filename) => {
+                            handle_model_click(
+                                &filename,
+                                &control_tx_for_menu,
+                                &cfg_for_menu,
+                                shared_for_menu.as_ref(),
+                            );
                         }
                         MenuAction::CheckUpdates => {
                             tracing::info!("Buscar actualizaciones placeholder — Fase 5");
@@ -923,6 +1052,27 @@ fn main() -> Result<()> {
                 }
                 ControlMessage::Exit => {
                     should_exit = true;
+                }
+                ControlMessage::RefreshMenu => {
+                    let snap = cfg.snapshot();
+                    let sections = oido_platform::tray::sections::default_sections(
+                        resolve_models_dir(),
+                        snap.model.clone(),
+                    );
+                    if let Some(ref mut t) = tray {
+                        if let Err(e) = t.rebuild_menu(sections) {
+                            tracing::error!(?e, "no se pudo reconstruir el menú");
+                        }
+                    }
+                }
+                ControlMessage::ActivateModel(filename) => {
+                    activate_after_download(
+                        &filename,
+                        &resolve_models_dir(),
+                        &cfg,
+                        shared_transcriber.as_ref(),
+                        &control_tx,
+                    );
                 }
             }
         }
