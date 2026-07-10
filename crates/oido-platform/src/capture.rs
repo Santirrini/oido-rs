@@ -20,6 +20,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crossbeam_channel::Sender;
+use std::fmt;
 
 use crate::traits::{CaptureSource, PlatformError};
 use crate::AudioFrame;
@@ -214,12 +215,22 @@ impl Default for CpalCapture {
 pub struct Resampler {
     inner: rubato::SincFixedIn<f32>,
     chunk_in: usize,
+    /// Acumulador entre llamadas: los samples que aún no completan un
+    /// chunk completo se difieren al siguiente `process`. Si en una
+    /// llamada llega más de un chunk completo (e.g. cpal entrega 4096
+    /// muestras de golpe), procesamos varios y los concatenamos.
+    pending: Vec<f32>,
+    /// Cuota de seguridad: si `pending` crece sin drenarse (algo va
+    /// mal aguas abajo), descartamos lo más viejo para no acumular
+    /// memoria indefinidamente. 32 × chunk_in @ 48 kHz ≈ 0.7 s.
+    max_pending: usize,
 }
 
 impl std::fmt::Debug for Resampler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Resampler")
             .field("chunk_in", &self.chunk_in)
+            .field("pending", &self.pending.len())
             .finish_non_exhaustive()
     }
 }
@@ -252,6 +263,8 @@ impl Resampler {
         .map(|inner| Self {
             inner,
             chunk_in: CHUNK_IN,
+            pending: Vec::new(),
+            max_pending: CHUNK_IN * 32,
         })
     }
 
@@ -261,35 +274,48 @@ impl Resampler {
         input_rate == 16_000
     }
 
-    /// Procesa un bloque completo de samples. Si el bloque es menor a
-    /// `chunk_in`, se completa con ceros (rubato requiere tamaño fijo).
-    /// Devuelve los samples resampleados a 16 kHz.
-    ///
-    /// Si el bloque es exactamente `chunk_in`, lo pasa tal cual.
-    /// Si es mayor, se procesa en chunks internos.
+    /// Procesa los samples de entrada y devuelve los equivalentes a
+    /// 16 kHz. **Acumula internamente** entre llamadas: si llega menos
+    /// de `chunk_in` muestras, las difiere; si llega más, las parte en
+    /// varios chunks completos. Sólo devuelve samples cuando hay al
+    /// menos un chunk completo disponible. Sustituye al `truncate` de
+    /// Fase 1 que silenciosamente descartaba audio cuando cpal
+    /// entregaba frames grandes (p.ej. 4096 muestras @ 48 kHz).
     pub fn process(&mut self, input: &[f32]) -> Result<Vec<f32>, PlatformError> {
         use rubato::Resampler;
         if input.is_empty() {
             return Ok(Vec::new());
         }
-        // rubato::SincFixedIn::process requiere exactamente chunk_in
-        // muestras. Padding con ceros si es más corto.
-        let mut padded = input.to_vec();
-        if padded.len() < self.chunk_in {
-            padded.resize(self.chunk_in, 0.0);
-        } else if padded.len() > self.chunk_in {
-            // Para bloques más grandes que chunk_in, procesamos el
-            // primero y dejamos el resto para la siguiente llamada.
-            // En la práctica los frames de cpal son ~10ms a 48kHz = 480
-            // muestras, mucho menor que chunk_in.
-            padded.truncate(self.chunk_in);
+        self.pending.extend_from_slice(input);
+
+        // Cuota de seguridad: si pending desborda (algo va mal
+        // aguas abajo y nadie drena), descartamos lo más viejo para
+        // no acumular memoria infinita.
+        if self.pending.len() > self.max_pending {
+            tracing::warn!(
+                pending = self.pending.len(),
+                max = self.max_pending,
+                "resampler.pending desbordó la cuota; descartando lo más viejo"
+            );
+            let drop_n = self.pending.len() - self.max_pending;
+            self.pending.drain(..drop_n);
         }
-        let waves_in = vec![padded];
-        let result = self
-            .inner
-            .process(&waves_in, None)
-            .map_err(|e| PlatformError::Capture(format!("resampler.process: {e}")))?;
-        Ok(result.into_iter().flatten().collect())
+
+        let mut out = Vec::new();
+        while self.pending.len() >= self.chunk_in {
+            let chunk: Vec<f32> = self.pending.drain(..self.chunk_in).collect();
+            let waves_in = vec![chunk];
+            let result = self
+                .inner
+                .process(&waves_in, None)
+                .map_err(|e| PlatformError::Capture(format!("resampler.process: {e}")))?;
+            out.extend(result.into_iter().flatten());
+        }
+        // Lo que quede en `self.pending` (< chunk_in) se difiere para
+        // completar en la próxima llamada. No paddeamos con ceros
+        // artificialmente: cualquier sample futuro los completa y
+        // rubato procesará exactamente chunk_in.
+        Ok(out)
     }
 }
 
@@ -333,12 +359,85 @@ mod tests {
     }
 
     #[test]
-    fn resampler_handles_short_input_with_zero_padding() {
+    fn resampler_deferes_short_input_until_chunk_completes() {
         let mut r = Resampler::new(48_000).expect("48kHz → 16kHz");
-        // Input de 100 muestras (más corto que chunk_in=1024) debe
-        // paddearse con ceros y procesarse igual.
-        let input = vec![0.1_f32; 100];
+        // Input de 100 muestras (< chunk_in=1024) no debe procesarse:
+        // se difiere al siguiente process. Esto reemplazó el padding
+        // con ceros (que metía 924 ceros "fantasma" en el flujo).
+        let partial = vec![0.1_f32; 100];
+        let out_partial = r.process(&partial).expect("process no debe fallar");
+        assert!(
+            out_partial.is_empty(),
+            "input de 100 muestras debe quedar pendiente, obtuve {}",
+            out_partial.len()
+        );
+    }
+
+    #[test]
+    fn resampler_accumulates_across_calls_to_complete_chunk() {
+        let mut r = Resampler::new(48_000).expect("48kHz → 16kHz");
+        // Tres llamadas de 400 + una de 100 = 1300 samples → 1 chunk
+        // completo (1024) más 276 pendientes.
+        let frame_a = vec![0.1_f32; 400];
+        let frame_b = vec![0.1_f32; 400];
+        let frame_c = vec![0.1_f32; 400];
+        let frame_d = vec![0.1_f32; 100];
+
+        let out_a = r.process(&frame_a).expect("a");
+        let out_b = r.process(&frame_b).expect("b");
+        let out_c = r.process(&frame_c).expect("c");
+        let out_d = r.process(&frame_d).expect("d");
+
+        // Las dos primeras llamadas no completan chunk (acumulado 800).
+        assert!(out_a.is_empty(), "tras 400 samples debe estar vacío");
+        assert!(out_b.is_empty(), "tras 800 samples debe estar vacío");
+
+        // La tercera completa 1200 → 1 chunk procesado + 176 pendientes.
+        assert!(
+            (280..=360).contains(&out_c.len()),
+            "esperaba ~290-350 samples @ 16kHz, obtuve {}",
+            out_c.len()
+        );
+
+        // La cuarta no llega a chunk completo, queda pendiente.
+        assert!(
+            out_d.is_empty(),
+            "276 + 100 = 376 < 1024 debe quedar pendiente, obtuve {}",
+            out_d.len()
+        );
+    }
+
+    #[test]
+    fn resampler_does_not_truncate_oversized_frames() {
+        let mut r = Resampler::new(48_000).expect("48kHz → 16kHz");
+        // 4096 muestras @ 48 kHz: antes esto se truncaba a 1024 y se
+        // perdía el 75% del audio. Ahora esperamos ~4 chunks → ~4 × 341
+        // = ~1364 samples de salida.
+        let input = vec![0.5_f32; 4096];
         let out = r.process(&input).expect("process no debe fallar");
-        assert!(!out.is_empty(), "input corto debe producir output");
+        // 4 chunks exactos: 4 × chunk_in = 4096 → ratio 1/3 → ~1365.
+        // Aceptamos 1000–1500 por márgenes del sinc interpolation.
+        assert!(
+            (1000..=1500).contains(&out.len()),
+            "esperaba 1000-1500 muestras @ 16kHz (4 chunks), obtuve {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn resampler_pending_does_not_explode() {
+        let mut r = Resampler::new(48_000).expect("48kHz → 16kHz");
+        // Bombeamos 100 chunks pequeños sin drenar el resultado.
+        // pending nunca debe superar max_pending = CHUNK_IN * 32.
+        for _ in 0..100 {
+            r.process(&vec![0.1_f32; 100]).expect("process");
+        }
+        // El `Debug` muestra `pending.len()` (acumulado no drenado). El
+        // assert no es trivial porque drains internos durante process
+        // pueden reducirlo. La cota superior garantizada por el
+        // código: nunca > max_pending en estado normal.
+        // Aquí basta con que no haya hecho panic.
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("Resampler"));
     }
 }

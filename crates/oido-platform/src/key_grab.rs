@@ -22,7 +22,7 @@
 
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, select, tick, Receiver};
+use crossbeam_channel::{bounded, select, tick};
 use global_hotkey::hotkey::{Code, Modifiers};
 use rdev::{Event, EventType, Key};
 
@@ -125,7 +125,12 @@ fn run_listener(tx: crossbeam_channel::Sender<(Modifiers, Code)>) {
     }
 }
 
-fn key_to_modifier(k: Key) -> Option<Modifiers> {
+/// Mapea un `rdev::Key` modificador (Ctrl/Shift/Alt/Meta) a su bit en
+/// `global_hotkey::Modifiers`. Reutilizado por `oido_platform::hotkey`
+/// para comparar el estado de modificadores actual con el binding target
+/// cuando llega un key-down.
+#[allow(dead_code)] // usado también por crate::hotkey
+pub(crate) fn key_to_modifier(k: Key) -> Option<Modifiers> {
     match k {
         Key::ControlLeft | Key::ControlRight => Some(Modifiers::CONTROL),
         Key::ShiftLeft | Key::ShiftRight => Some(Modifiers::SHIFT),
@@ -137,8 +142,11 @@ fn key_to_modifier(k: Key) -> Option<Modifiers> {
 
 /// Mapea un `rdev::Key` a su equivalente en `keyboard_types::Code`
 /// (el mismo tipo que `global_hotkey` consume). Cubre teclas comunes;
-/// teclas no mapeadas se ignoran silenciosamente.
-fn key_to_code(k: Key) -> Option<Code> {
+/// teclas no mapeadas se ignoran silenciosamente. Reutilizado por
+/// `oido_platform::hotkey` para comparar el key-down actual con el
+/// `binding.code` target.
+#[allow(dead_code)] // usado también por crate::hotkey
+pub(crate) fn key_to_code(k: Key) -> Option<Code> {
     use Code::*;
     let mapped = match k {
         // Letras
@@ -247,8 +255,7 @@ fn key_to_code(k: Key) -> Option<Code> {
     Some(mapped)
 }
 
-/// Suprime el warning de variable no usada cuando se compila sin tests.
-#[allow(dead_code)]
-fn _ensure_receiver_in_scope(rx: &Receiver<(Modifiers, Code)>) {
-    let _ = rx;
-}
+// El helper `_ensure_receiver_in_scope` se eliminó: `key_to_code` y
+// `key_to_modifier` son ahora `pub(crate)` y `Receiver` deja de
+// necesitarse en este archivo. Mantenemos el módulo enfocado en el
+// "captura-interactiva" para `--set-hotkey`.

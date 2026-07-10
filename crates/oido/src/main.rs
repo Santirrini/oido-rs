@@ -11,7 +11,7 @@ use oido_config::{Config, ConfigStore};
 use oido_core::{Pipeline, PipelineConfig, PipelineEvent, PipelineState};
 use oido_platform::{
     capture::CpalCapture,
-    hotkey::{self as hotkey_mod, GhHotkey},
+    hotkey::{self as hotkey_mod, RdevHotkey},
     injector::ArboardInjector,
     key_grab, PlatformTray, Tray, TrayState,
 };
@@ -93,7 +93,7 @@ fn main() -> Result<()> {
 
     // 2) Componer implementaciones por OS.
     let capture = Box::new(CpalCapture::new().context("init captura audio")?);
-    let hotkey = Box::new(GhHotkey::new());
+    let hotkey: Box<dyn oido_platform::Hotkey> = Box::new(RdevHotkey::new());
     let injector = ArboardInjector::new().context("init injector clipboard")?;
 
     // 3) Tray (MVP: stub en los 3 OS, sólo loggea el estado). Si falla
