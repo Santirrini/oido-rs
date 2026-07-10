@@ -64,6 +64,7 @@ pub enum PipelineState {
 #[derive(Debug, Clone)]
 pub enum PipelineEvent {
     State(PipelineState),
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -283,6 +284,7 @@ impl Pipeline {
     pub fn shutdown(&mut self) -> anyhow::Result<()> {
         let _ = self.cfg.capture.stop();
         let _ = self.cfg.hotkey.unregister();
+        let _ = self.event_tx.send(PipelineEvent::Shutdown);
         // Dropear los Senders cierra los canales; los workers salen
         // del `recv()` cuando el canal se cierra.
         // No hacemos join: cada worker termina solo, no bloqueamos

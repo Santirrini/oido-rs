@@ -14,6 +14,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Tema de color del icono de bandeja.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Dark,
+    Light,
+    System,
+}
+
+fn default_theme() -> Theme {
+    Theme::System
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -38,10 +51,13 @@ pub struct Config {
     /// (`min(cores, 8)`). Algunos valores límites: 1-8.
     #[serde(default = "default_n_threads")]
     pub n_threads: Option<u16>,
+    /// Tema de la interfaz de bandeja. Default: `System` (sigue al OS).
+    #[serde(default = "default_theme")]
+    pub theme: Theme,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
-fn default_use_gpu() -> bool {
+pub fn default_use_gpu() -> bool {
     cfg!(any(feature = "cuda", feature = "metal", feature = "vulkan"))
 }
 
@@ -57,6 +73,7 @@ impl Default for Config {
             language_ui: "es".into(),
             use_gpu: default_use_gpu(),
             n_threads: None,
+            theme: default_theme(),
         }
     }
 }
@@ -153,14 +170,18 @@ mod tests {
                 any::<String>(),
                 any::<bool>(),
                 proptest::option::of(1u16..=16),
+                proptest::sample::select(vec![Theme::Dark, Theme::Light, Theme::System]),
             )
-                .prop_map(|(hotkey, model, language_ui, use_gpu, n_threads)| Self {
-                    hotkey,
-                    model,
-                    language_ui,
-                    use_gpu,
-                    n_threads,
-                })
+                .prop_map(
+                    |(hotkey, model, language_ui, use_gpu, n_threads, theme)| Self {
+                        hotkey,
+                        model,
+                        language_ui,
+                        use_gpu,
+                        n_threads,
+                        theme,
+                    },
+                )
                 .boxed()
         }
     }
@@ -191,6 +212,13 @@ mod tests {
         assert_eq!(cfg.hotkey, "F9");
         assert_eq!(cfg.use_gpu, default_use_gpu());
         assert!(cfg.n_threads.is_none());
+    }
+
+    #[test]
+    fn backward_compat_missing_theme_field_uses_system() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON sin theme debe parsear");
+        assert_eq!(cfg.theme, Theme::System);
     }
 
     #[test]

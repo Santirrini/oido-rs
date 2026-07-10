@@ -70,8 +70,8 @@
 //! `pub(crate)` desde `key_grab.rs`).
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use global_hotkey::hotkey::{Code, HotKey as GHKey, Modifiers};
@@ -101,6 +101,7 @@ pub struct RdevHotkey {
     /// Binding actualmente registrado (para diagnostics y para evitar
     /// re-registros accidentales).
     active: Option<(Modifiers, Code)>,
+    win32_thread_id: Option<u32>,
 }
 
 impl fmt::Debug for RdevHotkey {
@@ -108,6 +109,7 @@ impl fmt::Debug for RdevHotkey {
         f.debug_struct("RdevHotkey")
             .field("active", &self.active)
             .field("listener_alive", &self.listener.is_some())
+            .field("win32_thread_id", &self.win32_thread_id)
             .finish()
     }
 }
@@ -125,6 +127,7 @@ impl RdevHotkey {
             listener: None,
             running: Arc::new(AtomicBool::new(false)),
             active: None,
+            win32_thread_id: None,
         }
     }
 
@@ -159,6 +162,7 @@ impl Hotkey for RdevHotkey {
 
         let (press_tx, press_rx) = crossbeam_channel::unbounded::<()>();
         let (release_tx, release_rx) = crossbeam_channel::unbounded::<()>();
+        let (tid_tx, tid_rx) = crossbeam_channel::bounded::<u32>(1);
 
         let running = Arc::clone(&self.running);
         running.store(true, Ordering::SeqCst);
@@ -168,14 +172,24 @@ impl Hotkey for RdevHotkey {
         let target_code_for_thread = target_code;
         let listener = thread::Builder::new()
             .name("oido-hotkey".into())
-            .spawn(move || run_rdev_grab(
-                target_mods_for_thread,
-                target_code_for_thread,
-                press_tx,
-                release_tx,
-                running,
-            ))
+            .spawn(move || {
+                run_rdev_grab(
+                    target_mods_for_thread,
+                    target_code_for_thread,
+                    press_tx,
+                    release_tx,
+                    running,
+                    tid_tx,
+                )
+            })
             .map_err(|e| PlatformError::Hotkey(format!("spawn listener: {e}")))?;
+
+        // Esperar el ID del hilo Win32
+        let win32_thread_id = match tid_rx.recv() {
+            Ok(tid) if tid != 0 => Some(tid),
+            _ => None,
+        };
+        self.win32_thread_id = win32_thread_id;
 
         // Hilos demux que invocan los closures boxed. Mismo patrón que
         // en el backend anterior.
@@ -202,14 +216,14 @@ impl Hotkey for RdevHotkey {
     }
 
     fn unregister(&mut self) -> Result<(), PlatformError> {
-        // Bajamos el flag: futuras iteraciones del callback lo verán y
-        // dejarán de emitir eventos. `rdev::listen` no expone API de
-        // interrupción hoy; el thread muere cuando el proceso termina.
         self.running.store(false, Ordering::SeqCst);
-        // Tomamos el JoinHandle sin bloquear (el thread puede estar
-        // todavía bloqueado en rdev::listen; en el shutdown del proceso
-        // se cierra de todas formas).
-        self.listener.take();
+        #[cfg(target_os = "windows")]
+        if let Some(tid) = self.win32_thread_id.take() {
+            oido_stt::post_win32_thread_quit(tid);
+        }
+        if let Some(lh) = self.listener.take() {
+            let _ = lh.join();
+        }
         self.active = None;
         Ok(())
     }
@@ -227,9 +241,10 @@ fn run_rdev_grab(
     press_tx: crossbeam_channel::Sender<()>,
     release_tx: crossbeam_channel::Sender<()>,
     running: Arc<AtomicBool>,
+    tid_tx: crossbeam_channel::Sender<u32>,
 ) {
-    use std::time::{Duration, Instant};
     use parking_lot::Mutex;
+    use std::time::{Duration, Instant};
 
     // Estado del matching. Va en un Mutex porque `rdev::grab` 0.5
     // requiere un callback `Fn` (no `FnMut`) — el closure interno en
@@ -242,6 +257,11 @@ fn run_rdev_grab(
         last_modifier_at: Option<Instant>,
     }
     let state = Mutex::new(MatchState::default());
+
+    #[cfg(target_os = "windows")]
+    let _ = tid_tx.send(oido_stt::get_current_win32_thread_id());
+    #[cfg(not(target_os = "windows"))]
+    let _ = tid_tx.send(0);
 
     // Callback de `rdev::grab`: `None` suprime el evento antes de que
     // llegue a la app con foco; `Some(event)` lo deja pasar. Esto es

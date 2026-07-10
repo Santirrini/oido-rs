@@ -21,7 +21,9 @@
 
 use std::path::{Path, PathBuf};
 
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams,
+};
 
 use super::{SttError, Transcriber};
 
@@ -72,6 +74,10 @@ pub struct WhisperCpp {
     language: Option<String>,
     gpu_config: GpuConfig,
     n_threads: u16,
+    /// Ruta al modelo Silero-VAD en formato GGML (`ggml-silero-v*.bin`).
+    /// Si es `None`, el VAD nativo de whisper.cpp queda desactivado y el
+    /// audio se procesa completo (comportamiento legacy).
+    vad_model_path: Option<PathBuf>,
 }
 
 impl Default for WhisperCpp {
@@ -81,6 +87,7 @@ impl Default for WhisperCpp {
             language: None,
             gpu_config: GpuConfig::default(),
             n_threads: detect_n_threads(),
+            vad_model_path: None,
         }
     }
 }
@@ -94,6 +101,7 @@ impl WhisperCpp {
             language: Some(language.into()),
             gpu_config: GpuConfig::default(),
             n_threads: detect_n_threads(),
+            vad_model_path: None,
         }
     }
 
@@ -103,6 +111,20 @@ impl WhisperCpp {
     pub fn with_runtime(mut self, gpu: GpuConfig, n_threads: u16) -> Self {
         self.gpu_config = gpu;
         self.n_threads = n_threads;
+        self
+    }
+
+    /// Activa el VAD nativo de whisper.cpp con el modelo Silero en
+    /// formato GGML. Si el archivo no existe, whisper.cpp devolverá
+    /// error al primer `transcribe()`; el bin debe descargar el modelo
+    /// antes de llamar a `load_model`.
+    ///
+    /// Con VAD activo, whisper.cpp **recorta físicamente** las regiones
+    /// sin voz del audio ANTES de pasarlo al encoder, lo que reduce la
+    /// latencia en dictados con pausas largas.
+    #[must_use]
+    pub fn with_vad(mut self, vad_model_path: PathBuf) -> Self {
+        self.vad_model_path = Some(vad_model_path);
         self
     }
 }
@@ -154,13 +176,20 @@ impl Transcriber for WhisperCpp {
         params.set_suppress_nst(true);
         params.set_temperature(0.0);
         params.set_temperature_inc(0.0); // sin fallback de temperatura
-        params.set_max_len(60); // corta loops tipo "gracias gracias gracias"
+                                         // NOTA: `set_max_len` mide CARACTERES por segmento (no tokens).
+                                         // Activarlo fragmenta palabras a la mitad y degrada la salida.
+                                         // La anti-alucinación real ya está cubierta por
+                                         // `entropy_thold`/`logprob_thold`/`suppress_blank`/`suppress_nst`.
+                                         // Por eso NO llamamos set_max_len: el default (0 = sin límite) es
+                                         // el correcto para hold-to-talk.
 
         // === Optimización para dictado corto (<30s) ===
-        // Por defecto, whisper.cpp divide el audio en ventanas de 30s y
-        // procesa cada una con overlap. En hold-to-talk el audio es
-        // siempre menor a 30s, así que forzamos 1 sola ventana: ahorra
-        // el cost del encoder repetido y mejora latencia.
+        // `single_segment` solo afecta al DECODER (segmentación de
+        // marcas de tiempo dentro de la ventana); NO ahorra trabajo del
+        // encoder. Para audio <30s, el bucle de whisper.cpp itera una
+        // sola vez sin importar este flag. Lo dejamos en true porque
+        // produce una salida limpia sin timestamps intermedios, que es
+        // lo que queremos para inyectar texto.
         params.set_single_segment(true);
         // No usar el resultado de la transcripción anterior como prompt;
         // en dictado puntual causa que frases se "peguen" entre
@@ -169,19 +198,55 @@ impl Transcriber for WhisperCpp {
         // Sin timestamps a nivel de token (overhead innecesario).
         params.set_token_timestamps(false);
 
-        // audio_ctx adaptativo para audios < 10 s (menos de 160_000 muestras)
+        // `audio_ctx` son mel-frames reducidos por 2, donde
+        // 1500 = 30 s = 50 frames/segundo. La fórmula correcta es
+        // `audio_secs * 50`, con un padding de 2 s para evitar truncar
+        // el último segundo por redondeo, piso de 100 (2 s) y techo de
+        // 1500 (30 s, capacidad máxima del encoder).
         let audio_secs = audio.len() as f32 / 16_000.0;
-        if audio_secs < 10.0 {
-            // Piso de 150 frames (1.5s), sube 150 por segundo de audio, limitado a máx 1500 (15s)
-            let ctx_frames = (((audio_secs + 1.0) * 150.0) as i32).min(1500);
-            params.set_audio_ctx(ctx_frames);
-        }
+        let ctx_frames = (((audio_secs + 2.0) * 50.0) as i32).clamp(100, 1500);
+        params.set_audio_ctx(ctx_frames);
 
         // Umbrales de confianza para mitigar alucinaciones y falsas detecciones en silencios
         params.set_entropy_thold(2.4);
         params.set_logprob_thold(-1.0);
         // Nota: no_speech_thold puede no estar implementado completamente según la versión de whisper.cpp, pero se setea preventivamente.
         params.set_no_speech_thold(0.6);
+
+        // === VAD nativo de whisper.cpp ===
+        // Si se configuró un modelo Silero-VAD en formato GGML, lo
+        // activamos para que whisper.cpp recorte las pausas antes del
+        // encoder. Esto reduce la latencia en dictados con silencios
+        // largos (caso típico 10-30 s con pausas entre frases).
+        //
+        // ORDEN OBLIGATORIO (verificado contra whisper-rs 0.16):
+        //   1. set_vad_model_path (si no, enable_vad PANIQUEA)
+        //   2. set_vad_params (opcional; usa defaults razonables)
+        //   3. enable_vad(true)
+        if let Some(vad_path) = &self.vad_model_path {
+            let vad_path_str = vad_path.to_str().ok_or_else(|| {
+                SttError::Backend(format!("VAD path no UTF-8: {}", vad_path.display()))
+            })?;
+            params.set_vad_model_path(Some(vad_path_str));
+
+            let mut vad_params = WhisperVadParams::new();
+            // 0.5 = balance estándar Silero (default).
+            vad_params.set_threshold(0.5);
+            // 250 ms mínimo de habla para considerar un segmento (evita
+            // disparar por ruidos cortos tipo clic).
+            vad_params.set_min_speech_duration(250);
+            // 500 ms de silencio = split point. Pausas más largas se
+            // recortan; más cortas se preservan para mantener la
+            // cadencia natural del habla.
+            vad_params.set_min_silence_duration(500);
+            // Padding de 30 ms alrededor de cada segmento de voz para
+            // evitar cortar el inicio/fin de palabras.
+            vad_params.set_speech_pad(30);
+            params.set_vad_params(vad_params);
+
+            params.enable_vad(true);
+            tracing::debug!(vad_path = ?vad_path, "VAD nativo activado");
+        }
 
         state
             .full(params, audio)
@@ -242,6 +307,66 @@ impl Transcriber for WhisperCpp {
         let _ = self.transcribe(&silence)?;
         tracing::info!("warm-up STT completado");
         Ok(())
+    }
+}
+
+/// Procesa de forma no bloqueante la cola de mensajes de Win32 para bombear los
+/// eventos del tray icon (como clics y menú contextual).
+#[cfg(target_os = "windows")]
+pub fn pump_windows_message_loop() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Modifica de forma dinámica el tema preferido de la aplicación (SetPreferredAppMode)
+/// para que los menús contextuales nativos de Windows respeten el modo oscuro/claro.
+#[cfg(target_os = "windows")]
+pub fn set_windows_menu_theme(theme: oido_config::Theme) {
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+    unsafe {
+        let uxtheme = LoadLibraryA(c"uxtheme.dll".as_ptr() as *const u8);
+        if !uxtheme.is_null() {
+            let set_preferred_app_mode = GetProcAddress(uxtheme, 135 as _);
+            if let Some(func) = set_preferred_app_mode {
+                let func: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(func);
+                let mode = match theme {
+                    oido_config::Theme::Dark => 2,  // ForceDark
+                    oido_config::Theme::Light => 3, // ForceLight
+                    oido_config::Theme::System => {
+                        // Intentamos detectar el tema del sistema
+                        match dark_light::detect() {
+                            dark_light::Mode::Light => 3,
+                            _ => 2,
+                        }
+                    }
+                };
+                func(mode);
+            }
+        }
+    }
+}
+
+/// Retorna el ID del hilo Win32 actual.
+#[cfg(target_os = "windows")]
+pub fn get_current_win32_thread_id() -> u32 {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    unsafe { GetCurrentThreadId() }
+}
+
+/// Envía un mensaje WM_QUIT a la cola de mensajes del hilo Win32 especificado.
+#[cfg(target_os = "windows")]
+pub fn post_win32_thread_quit(thread_id: u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+    unsafe {
+        PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
     }
 }
 

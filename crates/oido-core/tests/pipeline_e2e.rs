@@ -664,6 +664,7 @@ fn stt_error_emits_error_state() {
                     break;
                 }
             }
+            Ok(PipelineEvent::Shutdown) => break,
             Err(_) => break,
         }
     }

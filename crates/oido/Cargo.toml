@@ -20,7 +20,13 @@ tracing-subscriber.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
 parking_lot.workspace = true
+crossbeam-channel.workspace = true
+clap.workspace = true
+open.workspace = true
 oido-core = { path = "../oido-core", version = "0.1.0" }
 oido-config = { path = "../oido-config", version = "0.1.0" }
 oido-platform = { path = "../oido-platform", version = "0.1.0" }
 oido-stt = { path = "../oido-stt", version = "0.1.0" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }

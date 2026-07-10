@@ -22,8 +22,13 @@ audio-smoke = []
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+oido-config = { path = "../oido-config", version = "0.1.0" }
+dark-light.workspace = true
 
 # Fase 1: whisper-rs enlaza y compila whisper.cpp estáticamente. Build
 # pesa bastante (cmake + toolchain C++); ver CI install steps.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 whisper-rs.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Threading"] }

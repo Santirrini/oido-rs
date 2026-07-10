@@ -25,7 +25,7 @@ serde_json = "1"
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "ansi"] }
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 dirs = "5"
@@ -36,6 +36,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 proptest = "1"
 # Ctrl+C cross-platform (Windows: SetConsoleCtrlHandler, Unix: signal).
 ctrlc = "3"
+
+# CLI argument parsing.
+clap = { version = "4", features = ["derive", "wrap_help"] }
+
+# Native tray menus (Windows + macOS); Linux usa ksni directamente.
+muda = "0.15"
+
+# Detección de tema oscuro/claro del SO (Win/Mac/Linux).
+dark-light = "1"
+
+# Abrir directorios/URLs en el explorador/browser del OS.
+open = "5"
 
 # Fase 1: native SDK crates. Pinned a majors actuales (cargo resolver
 # elige parche mayor). Si una versión mayor causa rotura, fijar y

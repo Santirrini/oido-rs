@@ -49,6 +49,7 @@ pub type TextRx = Receiver<String>;
 
 pub mod capture;
 pub mod hotkey;
+pub mod icon;
 pub mod injector;
 pub mod key_grab;
 pub mod traits;
@@ -56,5 +57,6 @@ pub mod tray;
 
 pub use capture::Resampler;
 pub use hotkey::RdevHotkey;
-pub use traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray, TrayState};
+pub use oido_config::Theme;
+pub use traits::{CaptureSource, Hotkey, Injector, MenuAction, PlatformError, Tray, TrayState};
 pub use tray::PlatformTray;

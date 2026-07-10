@@ -5,9 +5,11 @@
 
 use std::fmt::Debug;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 
 use thiserror::Error;
+
+use oido_config::Theme;
 
 use crate::AudioFrame;
 
@@ -63,21 +65,34 @@ pub trait Hotkey: Debug + 'static {
     fn unregister(&mut self) -> Result<(), PlatformError>;
 }
 
-/// Icono de bandeja con estado (idle / listening / procesando).
-///
-/// El estado se representa como un enum simple. El icono real
-/// (assets/) se elige en cada `set_state`.
+/// Icono de bandeja con estado (idle / listening / procesando / pausado / error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
     Idle,
     Listening,
     Processing,
+    Paused,
+    Error,
 }
 
-pub trait Tray: Send + 'static {
+/// Acciones que puede disparar el menú nativo de bandeja.
+#[derive(Debug, Clone)]
+pub enum MenuAction {
+    ChangeHotkey,
+    SetTheme(Theme),
+    OpenModelsDir,
+    CheckUpdates,
+    TogglePause,
+    Exit,
+}
+
+pub trait Tray: 'static {
     fn show(&mut self) -> Result<(), PlatformError>;
-    fn set_state(&mut self, state: TrayState) -> Result<(), PlatformError>;
+    /// Actualiza el icono y el tooltip según el estado y el tema activo.
+    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), PlatformError>;
     fn hide(&mut self) -> Result<(), PlatformError>;
+    /// Devuelve el receptor de acciones de menú (solo la primera llamada devuelve `Some`).
+    fn take_menu_events(&mut self) -> Option<Receiver<MenuAction>>;
 }
 
 /// Inyecta texto vía clipboard + paste simulado (Ctrl/Cmd+V).

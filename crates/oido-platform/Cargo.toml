@@ -14,6 +14,9 @@ thiserror.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
+oido-config = { path = "../oido-config", version = "0.1.0" }
+oido-stt = { path = "../oido-stt", version = "0.1.0" }
+dark-light.workspace = true
 
 # Cross-platform OS abstractions. cpal/global-hotkey/arboard/enigo each
 # build on all 3 OS via conditional compilation in their own crates.
@@ -33,6 +36,7 @@ rubato.workspace = true
 # porque ksni es nativo D-Bus.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon.workspace = true
+muda.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni.workspace = true
