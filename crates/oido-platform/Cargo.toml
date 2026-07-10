@@ -19,7 +19,7 @@ parking_lot.workspace = true
 # build on all 3 OS via conditional compilation in their own crates.
 cpal.workspace = true
 global-hotkey.workspace = true
-rdev.workspace = true
+rdev = { workspace = true, features = ["unstable_grab"] }
 arboard.workspace = true
 enigo.workspace = true
 # Resampling sinc-based para dispositivos que no soportan 16 kHz

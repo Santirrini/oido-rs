@@ -62,8 +62,15 @@ impl Injector for ArboardInjector {
 
         // Pequeño respiro para que la ventana destino procese el cambio
         // antes de mandar la pulsación; en Win especialmente ahorra
-        // races con apps de bajo overhead.
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // races con apps de bajo overhead. Por defecto 5 ms, configurable
+        // mediante la variable de entorno OIDO_INJECT_GUARD_MS.
+        let guard_ms = std::env::var("OIDO_INJECT_GUARD_MS")
+            .ok()
+            .and_then(|val| val.parse::<u64>().ok())
+            .unwrap_or(5);
+        if guard_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(guard_ms));
+        }
 
         inner
             .enigo

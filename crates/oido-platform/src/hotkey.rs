@@ -1,4 +1,4 @@
-//! `Hotkey` global vía `rdev::listen`.
+//! `Hotkey` global vía `rdev::grab` con **supresión selectiva**.
 //!
 //! ## Por qué `rdev` y no `global-hotkey` (lo que usamos en Fase 1)
 //!
@@ -13,24 +13,57 @@
 //! Microsoft Learn). Resultado en Fase 1: la grabación arrancaba pero
 //! nunca se detenía y el audio nunca llegaba al worker STT.
 //!
-//! `rdev::listen` usa `RegisterRawInputDevices` en Windows y emite
-//! `KeyPress` / `KeyRelease` por separado, lo que sí cubre el ciclo
-//! hold-to-talk. En macOS requiere permisos Accessibility (igual que
-//! `global-hotkey`); en Linux/Wayland queda bloqueado por el protocolo.
+//! ## Por qué `grab` (no `listen`) y por qué requiere feature
 //!
-//! ## Diseño
+//! `rdev::listen` es **observación pasiva** (`RegisterRawInputDevices`
+//! en Windows): emite `KeyPress` / `KeyRelease` pero NO bloquea la
+//! tecla — F8 llegaba también a la app con foco, contaminando el
+//! dictado. Además, mantener F8 presionado disparaba rebote
+//! (`Recording → Processing → Recording`) que fragmentaba la
+//! grabación y producía alucinaciones.
+//!
+//! `rdev::grab` (feature `unstable_grab`) instala un hook global en
+//! bajo nivel (`WH_KEYBOARD_LL` en Windows, `CGEventTap` en macOS,
+//! `evdev` en Linux) y su callback devuelve `Option<Event>`:
+//! `None` suprime el evento antes de llegar a la app, `Some(event)`
+//! lo deja pasar. Esto nos permite:
+//!
+//! 1. **Suprimir la tecla target** (press y release) → F8 deja de
+//!    "filtrarse" al editor / navegador / cualquier foco.
+//! 2. **Pasar los modificadores tal cual** → si el binding es
+//!    `Ctrl+Shift+D`, sólo D se suprime; Ctrl/Shift siguen llegando
+//!    a la app, evitando modificadores "pegados" si oido se cuelga.
+//! 3. **Pasar mouse + todo lo demás** → el hook de grab instala
+//!    también un mouse hook; devolver `None` por defecto bloquearía
+//!    el ratón entero.
+//!
+//! `rdev::grab` cubre exactamente el ciclo hold-to-talk porque emite
+//! `KeyPress` / `KeyRelease` por separado.
+//!
+//! ### Caveats por SO (los mismos que `rdev::listen` + unos extra)
+//!
+//! - **Windows**: hook global; algunas sesiones RDP lo bloquean.
+//! - **macOS**: el proceso padre debe tener permisos Accessibility.
+//! - **Linux/X11**: requiere DISPLAY; el usuario debe pertenecer al
+//!   grupo `input` (o `plugdev` en algunas distros).
+//! - **Linux/Wayland**: evdev captura a nivel kernel, funciona.
+//!
+//! ## Diseño del matching
 //!
 //! - El binding canónico (`"F8"`, `"Alt+Space"`, `"1"`) se parsea vía
 //!   `parse` (que delega en `global_hotkey::hotkey::HotKey::try_from`)
 //!   para obtener `(target_mods, target_code)`.
-//! - El listener `rdev` mantiene un set de modificadores acumulados
+//! - El callback `grab` mantiene un set de modificadores acumulados
 //!   con la misma ventana `MODIFIER_WINDOW` que `key_grab`.
 //! - En cada `KeyPress` se compara `mods` + `key` con el target; si
-//!   matchean se envía por el canal de press.
+//!   matchean: `press_tx.send(())` + suprimir (`None`).
 //! - En cada `KeyRelease` se compara solo la `key` con el target; si
-//!   matchea se envía por el canal de release. NO limpiamos
+//!   matchea: `release_tx.send(())` + suprimir (`None`). NO limpiamos
 //!   modificadores al release (el usuario suele soltar Shift/Ctrl un
 //!   instante después de la tecla principal).
+//! - Modificadores (Ctrl/Shift/Alt/Meta) y cualquier otra tecla
+//!   pasan tal cual (`Some(event)`).
+//! - Mouse y todo lo demás: `Some(event)` por defecto al final.
 //!
 //! El binding se reutiliza también en `key_grab` para mapear
 //! `rdev::Key` → `Code` y `rdev::Key` → `Modifiers` (expuestos como
@@ -52,14 +85,14 @@ use crate::traits::{Hotkey, PlatformError};
 /// `key_grab::MODIFIER_WINDOW` para mantener consistencia de UX.
 const MODIFIER_WINDOW_MS: u64 = 500;
 
-/// Backend de hotkey basado en `rdev::listen`.
+/// Backend de hotkey basado en `rdev::grab` (con supresión selectiva).
 ///
-/// Una sola instancia por proceso. Tras `register(binding, …)` el listener
-/// queda corriendo en un thread dedicado hasta que se llama a
-/// `unregister()` o hasta el shutdown del proceso.
+/// Una sola instancia por proceso. Tras `register(binding, …)` el
+/// callback de `grab` queda corriendo en un thread dedicado hasta que
+/// se llama a `unregister()` o hasta el shutdown del proceso.
 pub struct RdevHotkey {
-    /// Receiver interno de rdev queda en este thread; `unregister` solo
-    /// sube `running` para futuras iteraciones (rdev::listen no
+    /// Handle al thread del callback de `rdev::grab`; `unregister` solo
+    /// sube `running` para futuras iteraciones (rdev::grab no
     /// interrumpe hoy por API). En la práctica el thread muere cuando
     /// el canal se cierra o el proceso sale.
     listener: Option<JoinHandle<()>>,
@@ -130,12 +163,12 @@ impl Hotkey for RdevHotkey {
         let running = Arc::clone(&self.running);
         running.store(true, Ordering::SeqCst);
 
-        // Hilo listener: drena `rdev::listen` y reparte a los canales.
+        // Hilo listener: drena `rdev::grab` y reparte a los canales.
         let target_mods_for_thread = target_mods;
         let target_code_for_thread = target_code;
         let listener = thread::Builder::new()
             .name("oido-hotkey".into())
-            .spawn(move || run_rdev_listener(
+            .spawn(move || run_rdev_grab(
                 target_mods_for_thread,
                 target_code_for_thread,
                 press_tx,
@@ -188,7 +221,7 @@ impl Drop for RdevHotkey {
     }
 }
 
-fn run_rdev_listener(
+fn run_rdev_grab(
     target_mods: Modifiers,
     target_code: Code,
     press_tx: crossbeam_channel::Sender<()>,
@@ -196,58 +229,88 @@ fn run_rdev_listener(
     running: Arc<AtomicBool>,
 ) {
     use std::time::{Duration, Instant};
+    use parking_lot::Mutex;
 
-    let mut current_mods = Modifiers::empty();
-    let mut last_modifier_at: Option<Instant> = None;
-    // Sólo bloqueamos el siguiente key-down si los modificadores fueron
-    // "frescos" (dentro de la ventana). Sin esto, los modificadores que
-    // el usuario dejó sueltos 5 segundos antes contaminarían el match.
+    // Estado del matching. Va en un Mutex porque `rdev::grab` 0.5
+    // requiere un callback `Fn` (no `FnMut`) — el closure interno en
+    // `rdev 0.5.3/src/lib.rs:362` exige eso. Mutamos a través del
+    // Mutex. Es local a este thread (`oido-hotkey`) — no incrementa
+    // el conteo de mutexes compartidos del workspace (regla R3).
+    #[derive(Default)]
+    struct MatchState {
+        current_mods: Modifiers,
+        last_modifier_at: Option<Instant>,
+    }
+    let state = Mutex::new(MatchState::default());
 
-    let callback = move |event: Event| {
+    // Callback de `rdev::grab`: `None` suprime el evento antes de que
+    // llegue a la app con foco; `Some(event)` lo deja pasar. Esto es
+    // lo que distingue `grab` de `listen`.
+    let callback = move |event: Event| -> Option<Event> {
         if !running.load(Ordering::SeqCst) {
-            return;
+            return Some(event); // shutdown en curso: dejar pasar todo
         }
         match event.event_type {
             EventType::KeyPress(k) => {
+                // Modificadores: pasan siempre a la app, sólo los
+                // acumulamos para el matching posterior. Suprimirlos
+                // dejaría Ctrl/Shift "pegados" si oido se cuelga.
                 if let Some(m) = key_to_modifier(k) {
-                    current_mods |= m;
-                    last_modifier_at = Some(Instant::now());
-                    return;
+                    let mut s = state.lock();
+                    s.current_mods |= m;
+                    s.last_modifier_at = Some(Instant::now());
+                    return Some(event);
                 }
                 // Stale mods: si el último modificador fue fuera de la
                 // ventana, no forman parte del combo.
-                if let Some(t) = last_modifier_at {
+                let mut s = state.lock();
+                if let Some(t) = s.last_modifier_at {
                     if t.elapsed() > Duration::from_millis(MODIFIER_WINDOW_MS) {
-                        current_mods = Modifiers::empty();
+                        s.current_mods = Modifiers::empty();
                     }
                 }
+                let current_mods = s.current_mods;
+                drop(s);
                 if let Some(code) = key_to_code(k) {
                     if code == target_code && current_mods == target_mods {
                         let _ = press_tx.send(());
+                        // ¡Suprimir! El key-down de la tecla target
+                        // nunca llega a la app con foco.
+                        return None;
                     }
                 }
+                // Cualquier otra tecla: pasa normal.
+                Some(event)
             }
             EventType::KeyRelease(k) => {
                 if let Some(code) = key_to_code(k) {
                     if code == target_code {
                         let _ = release_tx.send(());
+                        // También suprimimos el key-up: si F8 estaba
+                        // "presionado" para la app con foco, este
+                        // evento la descolgaría y vería una F8.
+                        return None;
                     }
                 }
                 // No limpiamos `current_mods` aquí: el usuario suele
                 // soltar Shift/Ctrl un instante después de la tecla
-                // principal y eso no debe invalidar matches posteriores.
-                // La limpieza se hace por ventana de tiempo en el
-                // siguiente KeyPress.
+                // principal y eso no debe invalidar matches
+                // posteriores. La limpieza se hace por ventana de
+                // tiempo en el siguiente KeyPress.
+                Some(event)
             }
-            _ => {}
+            // Mouse + cualquier otra cosa: pasa por defecto. CRÍTICO:
+            // `rdev::grab` también instala un mouse hook; devolver
+            // `None` en este branch bloquearía el ratón entero.
+            _ => Some(event),
         }
     };
 
-    if let Err(e) = rdev::listen(callback) {
+    if let Err(e) = rdev::grab(callback) {
         // Errores típicos: permisos en macOS, X11 sin DISPLAY, RDP en
         // Windows bloqueando raw input. Loggeamos; los canales se
         // cerrarán cuando `running = false` y `unregister` termine.
-        tracing::warn!(?e, "rdev::listen terminó con error");
+        tracing::warn!(?e, "rdev::grab terminó con error");
     }
 }
 

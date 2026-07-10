@@ -30,6 +30,10 @@ use super::{SttError, Transcriber};
 /// En `whisper-rs` 0.16, `WhisperContextParameters` sólo expone `use_gpu`
 /// (no `n_gpu_layers`); el offload total lo gestiona internamente la
 /// feature de compilación (`cuda`/`metal`/`vulkan`).
+///
+/// *Nota de rendimiento:* Compilar con `--features vulkan` (o la feature homónima)
+/// habilita la aceleración en GPUs integradas e integradas/discretas mediante Vulkan,
+/// una alternativa multiplataforma y de menor fricción que no requiere SDKs propietarios.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuConfig {
     pub use_gpu: bool,
@@ -114,16 +118,15 @@ fn detect_n_threads() -> u16 {
 
 impl Transcriber for WhisperCpp {
     fn transcribe(&self, audio: &[f32]) -> Result<String, SttError> {
+        // whisper.cpp requiere un mínimo de audio (ej. 300 ms = 4800 muestras @ 16kHz) para
+        // producir algo útil. Si entra menos, devuelve audio demasiado corto en lugar de alucinar.
+        if audio.len() < 4_800 {
+            return Err(SttError::AudioTooShort(audio.len()));
+        }
+
         let ctx = self.ctx.as_ref().ok_or_else(|| {
             SttError::ModelNotFound(PathBuf::from("<WhisperCpp: modelo no cargado>"))
         })?;
-
-        // whisper.cpp requiere 1s mínimo (16000 muestras @ 16kHz) para
-        // producir algo útil con `single_segment`. Si entra menos,
-        // devuelve audio demasiado corto en lugar de alucinar.
-        if audio.len() < 16_000 {
-            return Err(SttError::AudioTooShort(audio.len()));
-        }
 
         let mut state = ctx
             .create_state()
@@ -165,6 +168,20 @@ impl Transcriber for WhisperCpp {
         params.set_no_context(true);
         // Sin timestamps a nivel de token (overhead innecesario).
         params.set_token_timestamps(false);
+
+        // audio_ctx adaptativo para audios < 10 s (menos de 160_000 muestras)
+        let audio_secs = audio.len() as f32 / 16_000.0;
+        if audio_secs < 10.0 {
+            // Piso de 150 frames (1.5s), sube 150 por segundo de audio, limitado a máx 1500 (15s)
+            let ctx_frames = (((audio_secs + 1.0) * 150.0) as i32).min(1500);
+            params.set_audio_ctx(ctx_frames);
+        }
+
+        // Umbrales de confianza para mitigar alucinaciones y falsas detecciones en silencios
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
+        // Nota: no_speech_thold puede no estar implementado completamente según la versión de whisper.cpp, pero se setea preventivamente.
+        params.set_no_speech_thold(0.6);
 
         state
             .full(params, audio)
@@ -263,12 +280,11 @@ mod tests {
     #[test]
     fn short_audio_returns_audio_too_short() {
         let stt = WhisperCpp::default();
-        // Sin modelo cargamos; la rama de audio corto requiere modelo,
-        // así que este test ejercita la rama ModelNotFound que es
-        // regresión válida igualmente.
+        // Con la validación de largo de audio al inicio de transcribe(),
+        // no se requiere modelo cargado para fallar por audio corto.
         let audio = vec![0.0_f32; 800];
         let res = stt.transcribe(&audio);
-        assert!(matches!(res, Err(SttError::ModelNotFound(_))));
+        assert!(matches!(res, Err(SttError::AudioTooShort(800))));
     }
 
     /// Smoke test E2E: requiere `models/ggml-base.bin` en el repo local.

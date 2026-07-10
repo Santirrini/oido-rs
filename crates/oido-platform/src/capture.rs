@@ -109,6 +109,7 @@ impl CaptureSource for CpalCapture {
             .clone()
             .ok_or_else(|| PlatformError::Capture("open() no invocado antes de start()".into()))?;
         let sample_rate = self.sample_rate;
+        let channels = self.stream_config.channels as usize;
 
         // Ponytail: tres branches (F32/I16/U16) en lugar de un trait
         // object porque cpal selecciona el closure por tipo concreto.
@@ -116,8 +117,18 @@ impl CaptureSource for CpalCapture {
             cpal::SampleFormat::F32 => self.device.build_input_stream(
                 self.stream_config,
                 move |data: &[f32], _cb| {
+                    let samples = if channels == 1 {
+                        data.to_vec()
+                    } else {
+                        let mut mono = Vec::with_capacity(data.len() / channels);
+                        for frame in data.chunks_exact(channels) {
+                            let sum: f32 = frame.iter().sum();
+                            mono.push(sum / (channels as f32));
+                        }
+                        mono
+                    };
                     let _ = sink.send(AudioFrame {
-                        samples: data.to_vec(),
+                        samples,
                         sample_rate_hz: sample_rate,
                     });
                 },
@@ -127,7 +138,16 @@ impl CaptureSource for CpalCapture {
             cpal::SampleFormat::I16 => self.device.build_input_stream(
                 self.stream_config,
                 move |data: &[i16], _cb| {
-                    let samples: Vec<f32> = data.iter().map(|&s| f32::from(s) / 32_768.0).collect();
+                    let samples = if channels == 1 {
+                        data.iter().map(|&s| f32::from(s) / 32_768.0).collect()
+                    } else {
+                        let mut mono = Vec::with_capacity(data.len() / channels);
+                        for frame in data.chunks_exact(channels) {
+                            let sum: f32 = frame.iter().map(|&s| f32::from(s) / 32_768.0).sum();
+                            mono.push(sum / (channels as f32));
+                        }
+                        mono
+                    };
                     let _ = sink.send(AudioFrame {
                         samples,
                         sample_rate_hz: sample_rate,
@@ -139,10 +159,21 @@ impl CaptureSource for CpalCapture {
             cpal::SampleFormat::U16 => self.device.build_input_stream(
                 self.stream_config,
                 move |data: &[u16], _cb| {
-                    let samples: Vec<f32> = data
-                        .iter()
-                        .map(|&s| (f32::from(s) - 32_768.0) / 32_768.0)
-                        .collect();
+                    let samples = if channels == 1 {
+                        data.iter()
+                            .map(|&s| (f32::from(s) - 32_768.0) / 32_768.0)
+                            .collect()
+                    } else {
+                        let mut mono = Vec::with_capacity(data.len() / channels);
+                        for frame in data.chunks_exact(channels) {
+                            let sum: f32 = frame
+                                .iter()
+                                .map(|&s| (f32::from(s) - 32_768.0) / 32_768.0)
+                                .sum();
+                            mono.push(sum / (channels as f32));
+                        }
+                        mono
+                    };
                     let _ = sink.send(AudioFrame {
                         samples,
                         sample_rate_hz: sample_rate,
@@ -244,7 +275,7 @@ impl Resampler {
         if input_rate == 0 || input_rate == 16_000 {
             return None; // nada que resamplear
         }
-        const CHUNK_IN: usize = 1024;
+        const CHUNK_IN: usize = 512;
         const OUT_RATE: u32 = 16_000;
         // rubato 0.15: ratio = output / input. Si queremos 48000 → 16000,
         // ratio = 1/3 = 0.333...; si 44100 → 16000, ratio = 16000/44100.
@@ -264,7 +295,7 @@ impl Resampler {
             inner,
             chunk_in: CHUNK_IN,
             pending: Vec::new(),
-            max_pending: CHUNK_IN * 32,
+            max_pending: CHUNK_IN * 64,
         })
     }
 
@@ -339,7 +370,7 @@ mod tests {
         let out = r.process(&input).expect("process no debe fallar");
         assert!(
             (280..=360).contains(&out.len()),
-            "esperaba ~290-350 samples @ 16kHz, obtuve {}",
+            "esperaba ~280-360 samples @ 16kHz, obtuve {}",
             out.len()
         );
     }
@@ -376,33 +407,33 @@ mod tests {
     #[test]
     fn resampler_accumulates_across_calls_to_complete_chunk() {
         let mut r = Resampler::new(48_000).expect("48kHz → 16kHz");
-        // Tres llamadas de 400 + una de 100 = 1300 samples → 1 chunk
-        // completo (1024) más 276 pendientes.
-        let frame_a = vec![0.1_f32; 400];
-        let frame_b = vec![0.1_f32; 400];
-        let frame_c = vec![0.1_f32; 400];
-        let frame_d = vec![0.1_f32; 100];
+        // Tres llamadas de 200 + una de 50 = 650 samples → 1 chunk
+        // completo (512) más 138 pendientes.
+        let frame_a = vec![0.1_f32; 200];
+        let frame_b = vec![0.1_f32; 200];
+        let frame_c = vec![0.1_f32; 200];
+        let frame_d = vec![0.1_f32; 50];
 
         let out_a = r.process(&frame_a).expect("a");
         let out_b = r.process(&frame_b).expect("b");
         let out_c = r.process(&frame_c).expect("c");
         let out_d = r.process(&frame_d).expect("d");
 
-        // Las dos primeras llamadas no completan chunk (acumulado 800).
-        assert!(out_a.is_empty(), "tras 400 samples debe estar vacío");
-        assert!(out_b.is_empty(), "tras 800 samples debe estar vacío");
+        // Las dos primeras llamadas no completan chunk (acumulado 400).
+        assert!(out_a.is_empty(), "tras 200 samples debe estar vacío");
+        assert!(out_b.is_empty(), "tras 400 samples debe estar vacío");
 
-        // La tercera completa 1200 → 1 chunk procesado + 176 pendientes.
+        // La tercera completa 600 → 1 chunk procesado + 88 pendientes.
         assert!(
-            (280..=360).contains(&out_c.len()),
-            "esperaba ~290-350 samples @ 16kHz, obtuve {}",
+            (120..=180).contains(&out_c.len()),
+            "esperaba ~120-180 samples @ 16kHz, obtuve {}",
             out_c.len()
         );
 
         // La cuarta no llega a chunk completo, queda pendiente.
         assert!(
             out_d.is_empty(),
-            "276 + 100 = 376 < 1024 debe quedar pendiente, obtuve {}",
+            "88 + 50 = 138 < 512 debe quedar pendiente, obtuve {}",
             out_d.len()
         );
     }

@@ -15,6 +15,23 @@
 //! `"oido-stt"` dedicado, que libera el thread del hotkey en
 //! microsegundos. Esto alinea el pipeline con la regla R1.
 //!
+//! ## Máquina de estados anti-reentrada
+//!
+//! Los callbacks `on_press` / `on_release` son idempotentes frente a
+//! rebotes del sistema operativo (autorepeat, KeyRelease fantasma de
+//! Windows al rotar foco, doble-click en raw input):
+//!
+//! - `Idle + press` → `Recording`
+//! - `Recording + press` → no-op (ya estamos grabando)
+//! - `Recording + release` → `Processing` (snapshot + enqueue STT)
+//! - `Idle + release` → **no-op** (evita `AudioTooShort` espurios y la
+//!   fragmentación que producía alucinaciones — antes, un release
+//!   en Idle siempre generaba un job vacío y un cambio de estado).
+//!
+//! Además la tecla target está **suprimida a nivel OS** por
+//! `rdev::grab` en `oido-platform::hotkey`, así que la app con foco
+//! nunca la ve.
+//!
 //! Regla R3: el único mutex del workspace *fuera* de `oido-config` es
 //! este.
 //!
@@ -70,10 +87,9 @@ struct BufferState {
 /// Tipo del canal STT: vector de muestras listas para transcribir.
 type SttJob = Vec<f32>;
 
-/// Capacidad del canal STT. Hold-to-talk serializado: si el usuario
-/// suelta y vuelve a presionar antes de que termine el worker, el
-/// nuevo buffer reemplaza al anterior (no acumulamos backlog).
-const STT_QUEUE_CAP: usize = 1;
+/// Capacidad del canal STT. Hold-to-talk: subida a 4 para dar soporte a
+/// múltiples workers en paralelo (2 * STT_WORKERS).
+const STT_QUEUE_CAP: usize = 4;
 
 #[derive(Debug)]
 pub struct Pipeline {
@@ -87,7 +103,7 @@ pub struct Pipeline {
     event_tx: Sender<PipelineEvent>,
     event_rx: Receiver<PipelineEvent>,
     audio_consumer: Option<JoinHandle<()>>,
-    stt_worker: Option<JoinHandle<()>>,
+    stt_workers: Vec<JoinHandle<()>>,
 }
 
 impl Pipeline {
@@ -106,7 +122,7 @@ impl Pipeline {
             event_tx,
             event_rx,
             audio_consumer: None,
-            stt_worker: None,
+            stt_workers: Vec::new(),
         }
     }
 
@@ -182,20 +198,23 @@ impl Pipeline {
             })?;
         self.audio_consumer = Some(audio_consumer);
 
-        // 3) STT worker: drena stt_rx → transcribe → filter → inject.
-        // Posee su propio clon de event_tx, transcriber, injector.
-        let stt_rx = self.stt_rx.clone();
-        let event_tx = self.event_tx.clone();
-        let transcriber = Arc::clone(&self.cfg.transcriber);
-        let injector = Arc::clone(&self.cfg.injector);
-        let stt_worker = thread::Builder::new()
-            .name("oido-stt".into())
-            .spawn(move || {
-                while let Ok(buffer) = stt_rx.recv() {
-                    process_one(buffer, &transcriber, &injector, &event_tx);
-                }
-            })?;
-        self.stt_worker = Some(stt_worker);
+        // 3) STT workers: drena stt_rx → transcribe → filter → inject.
+        //    Posee su propio clon de event_tx, transcriber, injector.
+        const STT_WORKERS: usize = 2;
+        for i in 0..STT_WORKERS {
+            let stt_rx = self.stt_rx.clone();
+            let event_tx = self.event_tx.clone();
+            let transcriber = Arc::clone(&self.cfg.transcriber);
+            let injector = Arc::clone(&self.cfg.injector);
+            let worker = thread::Builder::new()
+                .name(format!("oido-stt-{i}"))
+                .spawn(move || {
+                    while let Ok(buffer) = stt_rx.recv() {
+                        process_one(buffer, &transcriber, &injector, &event_tx);
+                    }
+                })?;
+            self.stt_workers.push(worker);
+        }
 
         // 4) hotkey: cierra el ciclo press → record, release → enqueue.
         let event_tx = self.event_tx.clone();
@@ -216,8 +235,18 @@ impl Pipeline {
         let stt_tx = self.stt_tx.clone();
         let on_release = Box::new(move || {
             // 4a) snapshot del buffer + cambio de estado.
+            //
+            // Guarda anti-reentrada: si NO estamos grabando, el
+            // release es un rebote (autorepeat / KeyRelease fantasma
+            // de Windows / cambio de foco). Lo ignoramos por completo
+            // y NO emitimos estado: un release en `Idle` antes
+            // provocaba un job vacío en STT que devolvía
+            // `AudioTooShort` y fragmentaba la grabación.
             let buffer = {
                 let mut s = recording_r.lock();
+                if !s.recording {
+                    return;
+                }
                 s.recording = false;
                 std::mem::take(&mut s.samples)
             };
@@ -268,6 +297,15 @@ impl Drop for Pipeline {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
+struct LatencyReport {
+    audio_secs: f64,
+    stt_ms: u64,
+    inject_ms: u64,
+    total_ms: u64,
+}
+
 /// Lógica del worker STT: procesa un buffer, emite eventos, inyecta.
 fn process_one(
     buffer: SttJob,
@@ -280,13 +318,16 @@ fn process_one(
 
     // STT. Bloquea (whisper.cpp es CPU/GPU-bound).
     let started = Instant::now();
-    let text = match transcriber.transcribe(&buffer) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!(?e, samples, audio_seconds, "STT falló");
-            let _ = event_tx.send(PipelineEvent::State(PipelineState::Error));
-            let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
-            return;
+    let text = {
+        let _span = tracing::info_span!("stt.infer").entered();
+        match transcriber.transcribe(&buffer) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(?e, samples, audio_seconds, "STT falló");
+                let _ = event_tx.send(PipelineEvent::State(PipelineState::Error));
+                let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
+                return;
+            }
         }
     };
     let stt_latency = started.elapsed();
@@ -313,13 +354,16 @@ fn process_one(
     }
     let inject_latency = inject_started.elapsed();
 
+    let report = LatencyReport {
+        audio_secs: audio_seconds,
+        stt_ms: stt_latency.as_millis() as u64,
+        inject_ms: inject_latency.as_millis() as u64,
+        total_ms: stt_latency.as_millis() as u64 + inject_latency.as_millis() as u64,
+    };
     tracing::info!(
         text = %text,
         samples,
-        audio_seconds,
-        stt_latency_ms = stt_latency.as_millis() as u64,
-        inject_latency_ms = inject_latency.as_millis() as u64,
-        total_latency_ms = stt_latency.as_millis() as u64 + inject_latency.as_millis() as u64,
+        latency_report = ?report,
         "dictado inyectado"
     );
     let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));

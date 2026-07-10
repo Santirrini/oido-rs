@@ -2,9 +2,8 @@
 //! espera Ctrl+C. La UI Tauri llega en Fase 3.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use oido_config::{Config, ConfigStore};
@@ -56,6 +55,7 @@ fn main() -> Result<()> {
         .init();
 
     tracing::info!("oido 2.0 starting (Fase 1: dicta-y-pega optimizado)");
+    tracing::info!("Tip: Para el mejor rendimiento en CPU, se recomienda usar el modelo large-v3-turbo-q5_0.");
 
     // 1) Config (defaults aplican si no hay config.json).
     let cfg = ConfigStore::load_or_default().context("loading config")?;
@@ -132,6 +132,23 @@ fn main() -> Result<()> {
              Tip: scripts/download_model.ps1 (Win) o scripts/download_model.sh (Unix)"
         );
     } else {
+        let size_mib = std::fs::metadata(&model_path)
+            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+            .unwrap_or(0.0);
+        tracing::info!(
+            path = ?model_path,
+            size_mib = %format!("{:.1}", size_mib),
+            "modelo whisper cargado exitosamente"
+        );
+
+        let model_name = model_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if model_name.contains("large-v3") && !model_name.contains("turbo") && !model_name.contains("q") && !snap.use_gpu {
+            tracing::warn!(
+                "Estás usando un modelo large-v3 FP16 en CPU sin GPU. Esto causará una latencia extremadamente alta (~2-3x más lento). \
+                 Se recomienda usar large-v3-turbo o una versión cuantizada (e.g. large-v3-turbo-q5_0) para ejecución en CPU."
+            );
+        }
+
         // Warm-up: 1 inferencia de silencio para cargar pesos + GPU. Sin
         // esto, el primer dictado paga el cold-start (varios segundos
         // si hay GPU por la subida de capas).
@@ -156,14 +173,13 @@ fn main() -> Result<()> {
     };
     let mut pipeline = Pipeline::new(pipeline_cfg);
 
-    // 6) Ctrl+C → apagado limpio. Handler sólo setea un flag; el loop
-    //    principal lo observa y llama a `shutdown` antes de salir.
-    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    // 6) Ctrl+C → apagado limpio. Handler hace unpark al thread principal.
+    let main_thread = std::thread::current();
     ctrlc::set_handler({
-        let flag = Arc::clone(&shutdown_requested);
+        let thread = main_thread.clone();
         move || {
             tracing::info!("Ctrl+C recibido, terminando");
-            flag.store(true, Ordering::SeqCst);
+            thread.unpark();
         }
     })
     .context("instalando handler Ctrl+C")?;
@@ -197,12 +213,8 @@ fn main() -> Result<()> {
         "hold {binding}, dicta, suelta. Ctrl+C para salir."
     );
 
-    // Loop principal: poll del flag de shutdown. 200 ms es suficientemente
-    // fino para sentirse "instantáneo" al cancelar pero suficientemente
-    // gordo para no quemar CPU.
-    while !shutdown_requested.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    // Espera hasta que el handler de Ctrl+C despierte al thread.
+    std::thread::park();
 
     let _ = pipeline.shutdown();
     tracing::info!("oido 2.0 cerrado");
