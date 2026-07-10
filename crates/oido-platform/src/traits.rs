@@ -46,10 +46,17 @@ pub trait CaptureSource: Send + Debug + 'static {
 /// internamente (!Send en Windows). Como el Hotkey solo se usa
 /// dentro del thread principal del bin, no necesitamos `Send` en el
 /// trait. `Register/inject` ocurre antes de spawnar workers de audio.
+///
+/// El binding (canónico, p.ej. `"F8"` o `"Ctrl+Shift+D"`) se pasa en
+/// cada `register` para que el bin pueda propagar el valor de
+/// `Config.hotkey` sin acoplar el trait a `Config`.
 pub trait Hotkey: Debug + 'static {
-    /// Registra la combinación y conecta callbacks boxed.
+    /// Registra la combinación apuntada por `binding` y conecta los
+    /// callbacks boxed. El binding debe estar en formato canónico
+    /// aceptado por `oido_platform::hotkey::parse`.
     fn register(
         &mut self,
+        binding: &str,
         on_press: Box<dyn Fn() + Send + 'static>,
         on_release: Box<dyn Fn() + Send + 'static>,
     ) -> Result<(), PlatformError>;

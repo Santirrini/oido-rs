@@ -30,6 +30,23 @@ pub struct Config {
     pub hotkey: String,
     pub model: String,
     pub language_ui: String,
+    /// Activar aceleración por GPU. Default: `true` si el bin fue
+    /// compilado con `--features cuda|metal|vulkan`; `false` en CPU.
+    #[serde(default = "default_use_gpu")]
+    pub use_gpu: bool,
+    /// Número de threads para whisper.cpp. `None` = autodetectar
+    /// (`min(cores, 8)`). Algunos valores límites: 1-8.
+    #[serde(default = "default_n_threads")]
+    pub n_threads: Option<u16>,
+}
+
+/// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
+fn default_use_gpu() -> bool {
+    cfg!(any(feature = "cuda", feature = "metal", feature = "vulkan"))
+}
+
+fn default_n_threads() -> Option<u16> {
+    None
 }
 
 impl Default for Config {
@@ -38,6 +55,8 @@ impl Default for Config {
             hotkey: "F8".into(),
             model: "ggml-base.bin".into(),
             language_ui: "es".into(),
+            use_gpu: default_use_gpu(),
+            n_threads: None,
         }
     }
 }
@@ -128,11 +147,19 @@ mod tests {
         type Parameters = ();
         type Strategy = proptest::strategy::BoxedStrategy<Self>;
         fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
-            (any::<String>(), any::<String>(), any::<String>())
-                .prop_map(|(hotkey, model, language_ui)| Self {
+            (
+                any::<String>(),
+                any::<String>(),
+                any::<String>(),
+                any::<bool>(),
+                proptest::option::of(1u16..=16),
+            )
+                .prop_map(|(hotkey, model, language_ui, use_gpu, n_threads)| Self {
                     hotkey,
                     model,
                     language_ui,
+                    use_gpu,
+                    n_threads,
                 })
                 .boxed()
         }
@@ -144,6 +171,26 @@ mod tests {
         assert_eq!(cfg.hotkey, "F8");
         assert_eq!(cfg.model, "ggml-base.bin");
         assert_eq!(cfg.language_ui, "es");
+        assert!(cfg.n_threads.is_none());
+    }
+
+    #[test]
+    fn default_use_gpu_matches_compiled_features() {
+        let cfg = Config::default();
+        let expected = cfg!(any(feature = "cuda", feature = "metal", feature = "vulkan"));
+        assert_eq!(cfg.use_gpu, expected);
+    }
+
+    /// JSON antiguo (sin los campos nuevos) debe cargar con defaults
+    /// aplicados vía `serde(default)`. Esto garantiza retro-compat
+    /// cuando el usuario actualiza de Fase 1 a Fase 2.
+    #[test]
+    fn backward_compat_missing_fields_use_defaults() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON antiguo debe parsear");
+        assert_eq!(cfg.hotkey, "F9");
+        assert_eq!(cfg.use_gpu, default_use_gpu());
+        assert!(cfg.n_threads.is_none());
     }
 
     #[test]

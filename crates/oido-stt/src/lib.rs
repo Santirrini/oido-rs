@@ -5,12 +5,10 @@
 //! - API **100% safe Rust**. Toda la `unsafe` de FFI vive en `whisper_cpp.rs`.
 //! - `Send + Sync` para poder cruzar threads de captura y de inyección.
 //! - Sin estado mutable compartido con otras etapas del pipeline.
-//!
-//! La impl real (`WhisperCpp`) entra en Fase 1 con `whisper-rs` enlazado.
 
 pub mod whisper_cpp;
 
-pub use whisper_cpp::WhisperCpp;
+pub use whisper_cpp::{GpuConfig, WhisperCpp};
 
 use std::fmt::Debug;
 
@@ -36,6 +34,15 @@ pub trait Transcriber: Send + Sync + std::fmt::Debug {
     /// Carga un modelo desde disco. Es la única operación que requiere
     /// `&mut self`.
     fn load_model(&mut self, model_path: &std::path::Path) -> Result<(), SttError>;
+
+    /// Calienta el backend: fuerza la carga lazy de pesos y, si hay GPU,
+    /// la subida de capas a VRAM. Sin esto, el primer dictado del
+    /// usuario paga el cold-start.
+    ///
+    /// Default: no-op. Los backends con estado lazy lo implementan.
+    fn warm_up(&self) -> Result<(), SttError> {
+        Ok(())
+    }
 }
 
 /// Constructor factory retornado por el backend. La selección de

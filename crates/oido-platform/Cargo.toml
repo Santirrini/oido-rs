@@ -19,8 +19,13 @@ parking_lot.workspace = true
 # build on all 3 OS via conditional compilation in their own crates.
 cpal.workspace = true
 global-hotkey.workspace = true
+rdev.workspace = true
 arboard.workspace = true
 enigo.workspace = true
+# Resampling sinc-based para dispositivos que no soportan 16 kHz
+# nativo (muchos USB mics son 44.1/48 kHz). whisper.cpp requiere 16
+# kHz estricto.
+rubato.workspace = true
 
 # Tray: tray-icon (Win+macOS) vía AppIndicator/NSStatus; ksni (Linux)
 # vía StatusNotifierItem. NO tray-icon en Linux: trae gtk3-rs

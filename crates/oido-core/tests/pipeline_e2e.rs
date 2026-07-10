@@ -165,9 +165,14 @@ impl MockHotkeyHandle {
 impl Hotkey for MockHotkey {
     fn register(
         &mut self,
+        binding: &str,
         on_press: Box<dyn Fn() + Send + 'static>,
         on_release: Box<dyn Fn() + Send + 'static>,
     ) -> Result<(), PlatformError> {
+        // El mock ignora el binding (no tiene OS-level semantics); los
+        // tests del parser en `oido-platform::hotkey` ejercitan la
+        // conversión `&str → (Modifiers, Code)` independientemente.
+        let _ = binding;
         *self.inner.on_press.lock() = Some(on_press);
         *self.inner.on_release.lock() = Some(on_release);
         Ok(())
@@ -324,6 +329,7 @@ fn make_rig(initial_response: &str) -> Rig {
         transcriber: Arc::new(transcriber) as Arc<dyn Transcriber>,
         injector: Arc::new(injector) as Arc<dyn Injector>,
         hotkey: Box::new(hotkey),
+        hotkey_binding: "F8".into(),
     };
     let mut pipeline = Pipeline::new(cfg);
     pipeline.start().expect("start del pipeline con mocks");
@@ -589,4 +595,97 @@ fn transcriber_response_can_be_reconfigured() {
     );
 
     rig.pipeline.shutdown().ok();
+}
+
+/// Hotkey `on_release` debe ser no-bloqueante: vuelve al callback en
+/// microsegundos (no espera la inferencia STT). Esto se verifica
+/// cronometrando el `release()` y observando que el estado vuelve a
+/// `Idle` (transición completa) después.
+#[test]
+fn on_release_is_non_blocking() {
+    let mut rig = make_rig("hola");
+
+    rig.hotkey.press();
+    let _ = wait_for_state(
+        &rig.events,
+        PipelineState::Recording,
+        Duration::from_millis(200),
+    );
+    send_silence_and_drain(&rig, 500);
+
+    // Cronometramos release(): el callback debería encolar el buffer y
+    // volver en microsegundos (no esperar al STT).
+    let started = std::time::Instant::now();
+    rig.hotkey.release();
+    let elapsed = started.elapsed();
+
+    // release() retorna inmediatamente. Le damos un margen amplio
+    // porque en Windows el parking_lot::Mutex::lock puede tardar
+    // algo en condiciones de contención.
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "release() debe ser no-bloqueante, tardó {elapsed:?}"
+    );
+
+    // La transición completa sí ocurre asincrónicamente.
+    let _ = wait_for_state(&rig.events, PipelineState::Idle, Duration::from_millis(500));
+    assert_eq!(rig.injector.texts(), vec!["hola".to_string()]);
+
+    rig.pipeline.shutdown().ok();
+}
+
+/// Cuando el STT falla, el pipeline emite `Error` antes de volver a
+/// `Idle` para que la UI pueda mostrar feedback.
+#[test]
+fn stt_error_emits_error_state() {
+    let mut rig = make_rig("hola");
+    rig.transcriber.set_fail(true);
+
+    rig.hotkey.press();
+    let _ = wait_for_state(
+        &rig.events,
+        PipelineState::Recording,
+        Duration::from_millis(200),
+    );
+    send_silence_and_drain(&rig, 500);
+    rig.hotkey.release();
+
+    // Recolectamos todos los estados durante el ciclo (con margen
+    // amplio porque el recv_timeout del canal puede tardar).
+    let mut states = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_millis(2000);
+    while std::time::Instant::now() < deadline {
+        match rig.events.recv_timeout(Duration::from_millis(50)) {
+            Ok(PipelineEvent::State(s)) => {
+                if s == PipelineState::Error || s == PipelineState::Idle {
+                    states.push(s);
+                }
+                if states.contains(&PipelineState::Error) && states.contains(&PipelineState::Idle) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        states.contains(&PipelineState::Error),
+        "STT error debe emitir estado Error; secuencia: {states:?}"
+    );
+    assert!(
+        states.contains(&PipelineState::Idle),
+        "tras Error debe volver a Idle; secuencia: {states:?}"
+    );
+
+    rig.pipeline.shutdown().ok();
+}
+
+/// `warm_up` (default del trait) debe ser un no-op seguro para que el
+/// bin lo llame sin chequeos. Mock lo hereda del default.
+#[test]
+fn warm_up_is_safe_noop_for_mock() {
+    let t = MockTranscriber::new("hola");
+    let t: Arc<dyn Transcriber> = Arc::new(t);
+    // No falla aunque el mock no sobreescriba warm_up.
+    t.warm_up().expect("warm_up default debe ser Ok");
 }

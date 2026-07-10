@@ -42,11 +42,18 @@ ctrlc = "3"
 # comentar abajo.
 cpal = "0.18"
 global-hotkey = "0.8"
+# Captura global de teclado a nivel OS (event-driven, distingue
+# modificadores robustamente). Usado por `oido --set-hotkey` para que el
+# usuario "grabe" interactivamente la tecla de activación.
+rdev = "0.5"
 tray-icon = "0.24"
 ksni = "0.3"
 arboard = "3"
 enigo = "0.6"
 whisper-rs = "0.16"
+# Resampling de audio (CpalCapture puede recibir audio a 44.1/48kHz y
+# debe entregar 16kHz mono a whisper.cpp).
+rubato = "0.15"
 
 # Stage lock: every member inherits MSRV pinned via workspace.package above.
 

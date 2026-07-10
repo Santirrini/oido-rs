@@ -8,6 +8,16 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Aceleración por GPU. Opt-in porque requiere drivers/toolchain en la
+# máquina destino. `GpuConfig::auto_detect()` se basa en estas features
+# para decidir el `use_gpu` por defecto.
+cuda = ["whisper-rs/cuda"]
+metal = ["whisper-rs/metal"]
+vulkan = ["whisper-rs/vulkan"]
+# Smoke test que requiere modelo .bin en disco.
+audio-smoke = []
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true

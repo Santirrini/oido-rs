@@ -15,8 +15,9 @@ use crossbeam_channel::{Receiver, Sender};
 
 /// Frame de audio PCM mono. En MVP usamos la `f32` del formato nativo
 /// de `cpal` o f32 normalizado (i16 / 32_768). La frecuencia puede no
-/// ser 16 kHz: Fase 2 añade un resampler. MVP asume dispositivo capaz
-/// de 16 kHz mono (la mayoría de mics USB sí).
+/// ser 16 kHz: el consumer thread de `oido-core` se encarga del
+/// resampling a 16 kHz antes de transcribir (whisper.cpp lo requiere
+/// estricto).
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
     pub samples: Vec<f32>,
@@ -49,8 +50,10 @@ pub type TextRx = Receiver<String>;
 pub mod capture;
 pub mod hotkey;
 pub mod injector;
+pub mod key_grab;
 pub mod traits;
 pub mod tray;
 
+pub use capture::Resampler;
 pub use traits::{CaptureSource, Hotkey, Injector, PlatformError, Tray, TrayState};
 pub use tray::PlatformTray;
