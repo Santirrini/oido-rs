@@ -44,25 +44,18 @@ const MODIFIER_WINDOW: Duration = Duration::from_millis(500);
 /// `Escape` cancela el grab y devuelve `PlatformError::Hotkey(...)`.
 pub fn grab_next_key() -> Result<(Modifiers, Code), PlatformError> {
     let (tx, rx) = bounded::<(Modifiers, Code)>(1);
-    let (tid_tx, tid_rx) = bounded::<u32>(1);
 
     // El hilo de `rdev::listen` se apropia de `tx`. Si termina
     // (canal cerrado o error) el `select!` macro lo detecta.
-    let grab_handle = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("oido-key-grab".into())
-        .spawn(move || run_listener(tx, tid_tx))
+        .spawn(move || run_listener(tx))
         .map_err(|e| PlatformError::Hotkey(format!("grab: spawn thread: {e}")))?;
-
-    // Esperar el ID del hilo Win32
-    let win32_thread_id = match tid_rx.recv() {
-        Ok(tid) if tid != 0 => Some(tid),
-        _ => None,
-    };
 
     // Timeout duro para no colgar el bin si nadie pulsa nada.
     let ticker = tick(GRAB_TIMEOUT);
 
-    let result = select! {
+    select! {
         recv(rx) -> msg => match msg {
             Ok(pair) => Ok(pair),
             Err(_) => Err(PlatformError::Hotkey("grab: listener terminó sin resultado".into())),
@@ -70,24 +63,10 @@ pub fn grab_next_key() -> Result<(Modifiers, Code), PlatformError> {
         recv(ticker) -> _ => Err(PlatformError::Hotkey(format!(
             "grab: timeout {GRAB_TIMEOUT:?} sin pulsación"
         ))),
-    };
-
-    // En Windows, forzar la salida del hilo rdev::listen posteando WM_QUIT
-    #[cfg(target_os = "windows")]
-    if let Some(tid) = win32_thread_id {
-        oido_stt::post_win32_thread_quit(tid);
     }
-
-    // Unirse al hilo grabador para asegurar limpieza de recursos
-    let _ = grab_handle.join();
-
-    result
 }
 
-fn run_listener(
-    tx: crossbeam_channel::Sender<(Modifiers, Code)>,
-    tid_tx: crossbeam_channel::Sender<u32>,
-) {
+fn run_listener(tx: crossbeam_channel::Sender<(Modifiers, Code)>) {
     // Movemos el sender a un Option para poder "tomarlo" (y soltar el
     // canal) cuando llega Escape. Esto mantiene el closure como
     // `FnMut` (no consume `tx` por valor en la rama normal).
@@ -134,11 +113,6 @@ fn run_listener(
         }
         _ => {}
     };
-
-    #[cfg(target_os = "windows")]
-    let _ = tid_tx.send(oido_stt::get_current_win32_thread_id());
-    #[cfg(not(target_os = "windows"))]
-    let _ = tid_tx.send(0);
 
     // `rdev::listen` retorna `Result` con errores del backend. Si
     // falla (p.ej. permisos en macOS, X11 sin DISPLAY), loggeamos y

@@ -295,7 +295,7 @@ impl Resampler {
             inner,
             chunk_in: CHUNK_IN,
             pending: Vec::new(),
-            max_pending: CHUNK_IN * 64,
+            max_pending: CHUNK_IN * 128,
         })
     }
 

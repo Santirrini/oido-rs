@@ -88,9 +88,10 @@ struct BufferState {
 /// Tipo del canal STT: vector de muestras listas para transcribir.
 type SttJob = Vec<f32>;
 
-/// Capacidad del canal STT. Hold-to-talk: subida a 4 para dar soporte a
-/// múltiples workers en paralelo (2 * STT_WORKERS).
-const STT_QUEUE_CAP: usize = 4;
+/// Capacidad del canal STT. Hold-to-talk: 6 para dar margen extra sin
+/// riesgo de OOM y soportar ráfagas de 3+ activaciones consecutivas
+/// mientras los 2 workers procesan los buffers previos.
+const STT_QUEUE_CAP: usize = 6;
 
 #[derive(Debug)]
 pub struct Pipeline {

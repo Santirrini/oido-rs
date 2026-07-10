@@ -298,14 +298,24 @@ impl Transcriber for WhisperCpp {
     }
 
     fn warm_up(&self) -> Result<(), SttError> {
-        // Una inferencia de 1s de silencio fuerza:
+        // Una inferencia de 30 s de silencio (no 1 s) fuerza:
         // 1. La materialización de capas en memoria (CPU) o VRAM (GPU).
         // 2. La compilación lazy de kernels CUDA/Metal si aplica.
-        // Después de esto, el primer dictado del usuario corre en
-        // "tiempo caliente" sin cold-start.
-        let silence: Vec<f32> = vec![0.0; 16_000];
+        // 3. Las rutas de decoder multi-segmento y el VAD (si está
+        //    activo) hasta la capacidad máxima del encoder (1500 frames
+        //    = 30 s). Sin esto, el primer dictado de 20 s paga el
+        //    cold-path completo, añadiendo 1-3 s extra.
+        //
+        // El coste es ~5-10 s de arranque adicional; el beneficio es
+        // que el primer dictado del usuario corre "caliente" sin
+        // cold-start. Logueamos la duración para detectar regresiones.
+        let silence: Vec<f32> = vec![0.0; 16_000 * 30];
+        let started = std::time::Instant::now();
         let _ = self.transcribe(&silence)?;
-        tracing::info!("warm-up STT completado");
+        tracing::info!(
+            warmup_ms = started.elapsed().as_millis() as u64,
+            "warm-up STT completado (30s)"
+        );
         Ok(())
     }
 }

@@ -217,13 +217,9 @@ impl Hotkey for RdevHotkey {
 
     fn unregister(&mut self) -> Result<(), PlatformError> {
         self.running.store(false, Ordering::SeqCst);
-        #[cfg(target_os = "windows")]
-        if let Some(tid) = self.win32_thread_id.take() {
-            oido_stt::post_win32_thread_quit(tid);
-        }
-        if let Some(lh) = self.listener.take() {
-            let _ = lh.join();
-        }
+        // Evitamos llamar a post_win32_thread_quit y join para prevenir STATUS_ACCESS_VIOLATION
+        // debido a las limitaciones/condiciones de carrera de rdev con hooks globales en Windows.
+        self.listener.take();
         self.active = None;
         Ok(())
     }
