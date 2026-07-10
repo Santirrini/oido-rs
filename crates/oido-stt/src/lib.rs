@@ -7,6 +7,7 @@
 //! - Sin estado mutable compartido con otras etapas del pipeline.
 
 pub mod whisper_cpp;
+pub mod streaming;
 
 #[cfg(target_os = "windows")]
 pub use whisper_cpp::{
@@ -14,6 +15,7 @@ pub use whisper_cpp::{
     set_windows_menu_theme,
 };
 pub use whisper_cpp::{GpuConfig, WhisperCpp};
+pub use streaming::{LocalAgreementStreamer, PartialTranscript, Streamer};
 
 use std::fmt::Debug;
 

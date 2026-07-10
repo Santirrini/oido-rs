@@ -1,15 +1,36 @@
 //! Implementaciones nativas del icono de bandeja por plataforma.
 //!
-//! - Windows + macOS: `tray-icon` + `muda` (re-exportado por `tray-icon::menu`).
+//! - Windows + macOS: `tray-icon` + `muda` (re-exportado por `tray_icon::menu`).
 //! - Linux: `ksni` (StatusNotifierItem / D-Bus).
 //!
 //! La API pública (`PlatformTray`, `Tray` trait) permanece idéntica; solo
 //! el interior cambia de stub a implementación real.
+//!
+//! ## Modularidad del menú (Fase 3)
+//!
+//! El árbol del menú se construye a partir de una lista de
+//! `MenuSection` (ver `sections.rs`). Cada sección se describe con
+//! `MenuItemSpec` agnóstico al backend, y el backend nativo
+//! (Windows / macOS) lo traduce a items `tray_icon::menu::*`. El
+//! forwarder de eventos usa un `HashMap<MenuId, MenuAction>` que se
+//! rellena automáticamente con `id_to_action` desde el `id`
+//! canónico del spec.
+//!
+//! `PlatformTray::new()` usa `default_sections()` (mismo árbol que
+//! antes). `PlatformTray::with_sections(...)` permite al bin pasar
+//! un set personalizado.
+
+pub mod sections;
+
+use std::collections::HashMap;
 
 use oido_config::Theme;
+use tray_icon::menu::MenuId;
 
 use crate::icon;
 use crate::traits::{MenuAction, PlatformError, Tray, TrayState};
+
+use self::sections::{default_sections, id_to_action, MenuSection, Section};
 
 // ---------------------------------------------------------------------------
 // PlatformTray — wrapper que selecciona la impl según el OS en compilación
@@ -24,7 +45,15 @@ pub struct PlatformTray(WindowsTray);
 
 impl PlatformTray {
     pub fn new() -> Result<Self, PlatformError> {
-        Ok(Self(Inner::new()?))
+        Ok(Self(Inner::new(default_sections())?))
+    }
+
+    /// Construye el tray con un set de secciones declarativo. El
+    /// árbol visible es el descrito por las secciones; los items
+    /// siguen el mismo mapeo `id → MenuAction` que el set por
+    /// defecto.
+    pub fn with_sections(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
+        Ok(Self(Inner::new(sections)?))
     }
 }
 
@@ -66,6 +95,11 @@ pub struct LinuxTray {
     receiver: Option<crossbeam_channel::Receiver<MenuAction>>,
     current_state: TrayState,
     current_theme: Theme,
+    /// Secciones declarativas registradas (sin uso en la impl stub,
+    /// pero mantenidas para que el shape del struct sea simétrico al
+    /// de Windows/macOS y el API público sea uniforme entre OS).
+    #[allow(dead_code)]
+    sections: Vec<Box<dyn MenuSection>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -79,13 +113,18 @@ impl std::fmt::Debug for LinuxTray {
 
 #[cfg(target_os = "linux")]
 impl LinuxTray {
-    pub fn new() -> Result<Self, PlatformError> {
+    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
         let (sender, receiver) = crossbeam_channel::bounded(16);
+        tracing::info!(
+            count = sections.len(),
+            "tray Linux (stub): secciones registradas (no se renderizan aún)"
+        );
         Ok(Self {
             sender,
             receiver: Some(receiver),
             current_state: TrayState::Idle,
             current_theme: Theme::System,
+            sections,
         })
     }
 }
@@ -130,12 +169,12 @@ impl std::fmt::Debug for MacTray {
 
 #[cfg(target_os = "macos")]
 impl MacTray {
-    pub fn new() -> Result<Self, PlatformError> {
+    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
         let (sender, receiver) = crossbeam_channel::bounded::<MenuAction>(16);
         let rgba = icon::render_state(TrayState::Idle, Theme::System);
         let tray_icon_img = tray_icon::Icon::from_rgba(rgba.data, rgba.width, rgba.height)
             .map_err(|e| PlatformError::Tray(e.to_string()))?;
-        let (menu, id_map) = build_menu();
+        let (menu, id_map) = build_menu_from_sections(&sections);
         let icon = tray_icon::TrayIconBuilder::new()
             .with_icon(tray_icon_img)
             .with_tooltip("oido — idle")
@@ -197,12 +236,12 @@ impl std::fmt::Debug for WindowsTray {
 
 #[cfg(target_os = "windows")]
 impl WindowsTray {
-    pub fn new() -> Result<Self, PlatformError> {
+    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
         let (sender, receiver) = crossbeam_channel::bounded::<MenuAction>(16);
         let rgba = icon::render_state(TrayState::Idle, Theme::System);
         let tray_icon_img = tray_icon::Icon::from_rgba(rgba.data, rgba.width, rgba.height)
             .map_err(|e| PlatformError::Tray(e.to_string()))?;
-        let (menu, id_map) = build_menu();
+        let (menu, id_map) = build_menu_from_sections(&sections);
         let icon = tray_icon::TrayIconBuilder::new()
             .with_icon(tray_icon_img)
             .with_tooltip("oido — idle")
@@ -257,74 +296,90 @@ fn state_tooltip(state: TrayState) -> String {
         TrayState::Processing => "oido — procesando…".into(),
         TrayState::Paused => "oido — pausado".into(),
         TrayState::Error => "oido — error".into(),
+        TrayState::Loading => "oido — cargando modelo…".into(),
     }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 struct MenuIdMap {
-    id_change_hotkey: tray_icon::menu::MenuId,
-    id_dark: tray_icon::menu::MenuId,
-    id_light: tray_icon::menu::MenuId,
-    id_system: tray_icon::menu::MenuId,
-    id_open_models: tray_icon::menu::MenuId,
-    id_check_updates: tray_icon::menu::MenuId,
-    id_exit: tray_icon::menu::MenuId,
+    /// Map del `MenuId` nativo al id canónico del spec. El forwarder
+    /// consulta `id_to_action` para producir el `MenuAction`.
+    id_to_spec_id: HashMap<MenuId, &'static str>,
 }
 
-/// Construye el menú nativo de bandeja con `tray_icon::menu`.
+/// Construye el menú nativo de bandeja iterando sobre las secciones
+/// declarativas. Produce el MISMO árbol que el `build_menu` original
+/// (título, separador, Cambiar hotkey, Tema, Modo, separador,
+/// Utilidades, separador, Salir) y rellena un `MenuIdMap` que el
+/// forwarder usa para traducir clics a `MenuAction`s.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn build_menu() -> (tray_icon::menu::Menu, MenuIdMap) {
-    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+fn build_menu_from_sections(
+    sections: &[Box<dyn MenuSection>],
+) -> (tray_icon::menu::Menu, MenuIdMap) {
+    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 
     let menu = Menu::new();
+    let mut id_to_spec_id: HashMap<MenuId, &'static str> = HashMap::new();
 
+    // Título + separador inicial (idéntico al original).
     let title = MenuItem::new("oido 2.0", false, None);
     let _ = menu.append(&title);
     let _ = menu.append(&PredefinedMenuItem::separator());
 
-    let change_hotkey = MenuItem::new("Cambiar hotkey…", true, None);
-    let id_change_hotkey = change_hotkey.id().clone();
-    let _ = menu.append(&change_hotkey);
+    // Insertamos un separador entre cada sección para que la
+    // apariencia sea equivalente a la del menú original (que usaba
+    // separadores explícitos).
+    for (i, section) in sections.iter().enumerate() {
+        if i > 0 {
+            // Antes de cada sección posterior a la primera, agregamos
+            // separador (replica el patrón "Cambiar hotkey | Tema |
+            // Modo | sep | Utilidades | sep | Salir").
+            let _ = menu.append(&PredefinedMenuItem::separator());
+        }
+        for item in section.build() {
+            append_section(&menu, item, &mut id_to_spec_id);
+        }
+    }
 
-    let theme_sub = Submenu::new("Tema", true);
-    let dark_item = MenuItem::new("Dark", true, None);
-    let id_dark = dark_item.id().clone();
-    let light_item = MenuItem::new("Light", true, None);
-    let id_light = light_item.id().clone();
-    let system_item = MenuItem::new("Sistema", true, None);
-    let id_system = system_item.id().clone();
-    let _ = theme_sub.append(&dark_item);
-    let _ = theme_sub.append(&light_item);
-    let _ = theme_sub.append(&system_item);
-    let _ = menu.append(&theme_sub);
+    (
+        menu,
+        MenuIdMap {
+            id_to_spec_id,
+        },
+    )
+}
 
-    let _ = menu.append(&PredefinedMenuItem::separator());
+/// Helper recursivo: añade un `Section` al menú nativo y registra su
+/// mapeo `MenuId → spec_id`. Mantiene la traducción centralizada
+/// para que añadir un nuevo tipo de `Section` solo requiera un match
+/// aquí.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn append_section(
+    menu: &tray_icon::menu::Menu,
+    section: Section,
+    id_to_spec_id: &mut HashMap<MenuId, &'static str>,
+) {
+    use tray_icon::menu::{MenuItem, PredefinedMenuItem, Submenu};
 
-    let open_models = MenuItem::new("Abrir carpeta de modelos", true, None);
-    let id_open_models = open_models.id().clone();
-    let _ = menu.append(&open_models);
-
-    let check_updates = MenuItem::new("Buscar actualizaciones", true, None);
-    let id_check_updates = check_updates.id().clone();
-    let _ = menu.append(&check_updates);
-
-    let _ = menu.append(&PredefinedMenuItem::separator());
-
-    let exit_item = MenuItem::new("Salir", true, None);
-    let id_exit = exit_item.id().clone();
-    let _ = menu.append(&exit_item);
-
-    let id_map = MenuIdMap {
-        id_change_hotkey,
-        id_dark,
-        id_light,
-        id_system,
-        id_open_models,
-        id_check_updates,
-        id_exit,
-    };
-
-    (menu, id_map)
+    match section {
+        Section::Item(spec) => {
+            let item = MenuItem::new(&spec.label, spec.enabled, None);
+            id_to_spec_id.insert(item.id().clone(), spec.id);
+            let _ = menu.append(&item);
+        }
+        Section::Submenu { label, items } => {
+            let sub = Submenu::new(&label, true);
+            for spec in items {
+                let item = MenuItem::new(&spec.label, spec.enabled, None);
+                id_to_spec_id.insert(item.id().clone(), spec.id);
+                let _ = sub.append(&item);
+            }
+            let _ = menu.append(&sub);
+        }
+        Section::Separator => {
+            let _ = menu.append(&PredefinedMenuItem::separator());
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -334,20 +389,26 @@ fn spawn_event_forwarder(id_map: MenuIdMap, sender: crossbeam_channel::Sender<Me
     std::thread::spawn(move || {
         let menu_channel = MenuEvent::receiver();
         while let Ok(event) = menu_channel.recv() {
-            if event.id == id_map.id_change_hotkey {
-                let _ = sender.send(MenuAction::ChangeHotkey);
-            } else if event.id == id_map.id_dark {
-                let _ = sender.send(MenuAction::SetTheme(Theme::Dark));
-            } else if event.id == id_map.id_light {
-                let _ = sender.send(MenuAction::SetTheme(Theme::Light));
-            } else if event.id == id_map.id_system {
-                let _ = sender.send(MenuAction::SetTheme(Theme::System));
-            } else if event.id == id_map.id_open_models {
-                let _ = sender.send(MenuAction::OpenModelsDir);
-            } else if event.id == id_map.id_check_updates {
-                let _ = sender.send(MenuAction::CheckUpdates);
-            } else if event.id == id_map.id_exit {
-                let _ = sender.send(MenuAction::Exit);
+            // Resolver MenuId → spec_id (estático) → MenuAction.
+            // Si el spec_id no está mapeado (no debería pasar con el
+            // árbol declarativo actual), el evento se ignora y se
+            // loguea. Esto evita el `match` con 9 ramas que tenía la
+            // versión anterior: ahora cualquier nuevo item solo
+            // requiere actualizar `id_to_action` en `sections.rs`.
+            if let Some(&spec_id) = id_map.id_to_spec_id.get(&event.id) {
+                if let Some(action) = id_to_action(spec_id) {
+                    let _ = sender.send(action);
+                } else {
+                    tracing::warn!(
+                        spec_id,
+                        "MenuEvent con spec_id sin MenuAction mapeada"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    ?event.id,
+                    "MenuEvent con MenuId desconocido (ignorado)"
+                );
             }
         }
     });

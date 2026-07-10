@@ -80,6 +80,7 @@ pub enum TrayState {
 pub enum MenuAction {
     ChangeHotkey,
     SetTheme(Theme),
+    SetSttMode(oido_config::SttMode),
     OpenModelsDir,
     CheckUpdates,
     TogglePause,
@@ -103,4 +104,12 @@ pub trait Tray: 'static {
 /// guarda estado en `Arc<parking_lot::Mutex<Inner>>`.
 pub trait Injector: Send + Sync + Debug + 'static {
     fn inject(&self, text: &str) -> Result<(), PlatformError>;
+
+    /// Escribe texto simulando pulsaciones de teclas individuales (enigo text),
+    /// ideal para streaming incremental para no pisar el clipboard.
+    ///
+    /// Implementación por defecto: delega a `inject`.
+    fn type_text(&self, text: &str) -> Result<(), PlatformError> {
+        self.inject(text)
+    }
 }

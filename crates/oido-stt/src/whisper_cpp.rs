@@ -138,6 +138,100 @@ fn detect_n_threads() -> u16 {
         .min(8)
 }
 
+pub(crate) fn build_base_params(language: Option<&str>, n_threads: u16) -> FullParams<'_, '_> {
+    // Greedy determinista: el más rápido y el más repetible. Para
+    // dictado interactivo no necesitamos beam search (5× más lento).
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+    // === Throughput / paralelismo ===
+    params.set_n_threads(n_threads as i32);
+
+    // === Output ===
+    if let Some(lang) = language {
+        params.set_language(Some(lang));
+    }
+    params.set_translate(false);
+    params.set_print_realtime(false);
+    params.set_print_progress(false);
+    params.set_print_timestamps(false);
+    params.set_print_special(false);
+
+    // === Anti-alucinación ===
+    params.set_suppress_blank(true);
+    params.set_suppress_nst(true);
+    params.set_temperature(0.0);
+    params.set_temperature_inc(0.0); // sin fallback de temperatura
+                                     // NOTA: `set_max_len` mide CARACTERES por segmento (no tokens).
+                                     // Activarlo fragmenta palabras a la mitad y degrada la salida.
+                                     // La anti-alucinación real ya está cubierta por
+                                     // `entropy_thold`/`logprob_thold`/`suppress_blank`/`suppress_nst`.
+                                     // Por eso NO llamamos set_max_len: el default (0 = sin límite) es
+                                     // el correcto para hold-to-talk.
+
+    // === Optimización para dictado corto (<30s) ===
+    // `single_segment` solo afecta al DECODER (segmentación de
+    // marcas de tiempo dentro de la ventana); NO ahorra trabajo del
+    // encoder. Para audio <30s, el bucle de whisper.cpp itera una
+    // sola vez sin importar este flag. Lo dejamos en true porque
+    // produce una salida limpia sin timestamps intermedios, que es
+    // lo que queremos para inyectar texto.
+    params.set_single_segment(true);
+    // No usar el resultado de la transcripción anterior como prompt;
+    // en dictado puntual causa que frases se "peguen" entre
+    // activaciones.
+    params.set_no_context(true);
+    // Sin timestamps a nivel de token (overhead innecesario).
+    params.set_token_timestamps(false);
+
+    // Umbrales de confianza para mitigar alucinaciones y falsas detecciones en silencios
+    params.set_entropy_thold(2.4);
+    params.set_logprob_thold(-1.0);
+    // Nota: no_speech_thold puede no estar implementado completamente según la versión de whisper.cpp, pero se setea preventivamente.
+    params.set_no_speech_thold(0.6);
+
+    params
+}
+
+/// Parameters tuned for streaming / LocalAgreement-2 mode.
+///
+/// Key differences from `build_base_params`:
+/// - `single_segment(false)`: prevents the "single timestamp ending - skip entire chunk" seek
+///   loop that causes N redundant decode passes within a single `full()` call.
+/// - `token_timestamps(true)`: needed for accurate per-token extraction in LA-2.
+pub(crate) fn build_streaming_params(language: Option<&str>, n_threads: u16) -> FullParams<'_, '_> {
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+    params.set_n_threads(n_threads as i32);
+
+    if let Some(lang) = language {
+        params.set_language(Some(lang));
+    }
+    params.set_translate(false);
+    params.set_print_realtime(false);
+    params.set_print_progress(false);
+    params.set_print_timestamps(false);
+    params.set_print_special(false);
+
+    // Anti-hallucination
+    params.set_suppress_blank(true);
+    params.set_suppress_nst(true);
+    params.set_temperature(0.0);
+    params.set_temperature_inc(0.0);
+
+    // Streaming-specific: allow natural segmentation to avoid
+    // "single timestamp ending - skip entire chunk" seek loop.
+    params.set_single_segment(false);
+    params.set_no_context(true);
+    params.set_token_timestamps(true);
+
+    // Confidence thresholds
+    params.set_entropy_thold(2.4);
+    params.set_logprob_thold(-1.0);
+    params.set_no_speech_thold(0.6);
+
+    params
+}
+
 impl Transcriber for WhisperCpp {
     fn transcribe(&self, audio: &[f32]) -> Result<String, SttError> {
         // whisper.cpp requiere un mínimo de audio (ej. 300 ms = 4800 muestras @ 16kHz) para
@@ -154,49 +248,7 @@ impl Transcriber for WhisperCpp {
             .create_state()
             .map_err(|e| SttError::Backend(format!("create_state: {e}")))?;
 
-        // Greedy determinista: el más rápido y el más repetible. Para
-        // dictado interactivo no necesitamos beam search (5× más lento).
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-        // === Throughput / paralelismo ===
-        params.set_n_threads(self.n_threads as i32);
-
-        // === Output ===
-        if let Some(lang) = &self.language {
-            params.set_language(Some(lang.as_str()));
-        }
-        params.set_translate(false);
-        params.set_print_realtime(false);
-        params.set_print_progress(false);
-        params.set_print_timestamps(false);
-        params.set_print_special(false);
-
-        // === Anti-alucinación ===
-        params.set_suppress_blank(true);
-        params.set_suppress_nst(true);
-        params.set_temperature(0.0);
-        params.set_temperature_inc(0.0); // sin fallback de temperatura
-                                         // NOTA: `set_max_len` mide CARACTERES por segmento (no tokens).
-                                         // Activarlo fragmenta palabras a la mitad y degrada la salida.
-                                         // La anti-alucinación real ya está cubierta por
-                                         // `entropy_thold`/`logprob_thold`/`suppress_blank`/`suppress_nst`.
-                                         // Por eso NO llamamos set_max_len: el default (0 = sin límite) es
-                                         // el correcto para hold-to-talk.
-
-        // === Optimización para dictado corto (<30s) ===
-        // `single_segment` solo afecta al DECODER (segmentación de
-        // marcas de tiempo dentro de la ventana); NO ahorra trabajo del
-        // encoder. Para audio <30s, el bucle de whisper.cpp itera una
-        // sola vez sin importar este flag. Lo dejamos en true porque
-        // produce una salida limpia sin timestamps intermedios, que es
-        // lo que queremos para inyectar texto.
-        params.set_single_segment(true);
-        // No usar el resultado de la transcripción anterior como prompt;
-        // en dictado puntual causa que frases se "peguen" entre
-        // activaciones.
-        params.set_no_context(true);
-        // Sin timestamps a nivel de token (overhead innecesario).
-        params.set_token_timestamps(false);
+        let mut params = build_base_params(self.language.as_deref(), self.n_threads);
 
         // `audio_ctx` son mel-frames reducidos por 2, donde
         // 1500 = 30 s = 50 frames/segundo. La fórmula correcta es
