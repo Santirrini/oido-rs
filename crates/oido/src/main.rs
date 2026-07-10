@@ -12,11 +12,11 @@ use oido_config::{Config, ConfigStore, Theme};
 use oido_core::{Pipeline, PipelineConfig, PipelineEvent, PipelineState};
 use oido_platform::{
     capture::CpalCapture,
-    hotkey::{self as hotkey_mod, RdevHotkey},
+    hotkey::{self as hotkey_mod},
     injector::ArboardInjector,
-    key_grab, MenuAction, PlatformTray, Tray, TrayState,
+    key_grab, GatedHotkey, MenuAction, PlatformTray, Tray, TrayState,
 };
-use oido_stt::{GpuConfig, Transcriber, WhisperCpp};
+use oido_stt::{GpuConfig, SharedTranscriber, Transcriber, WhisperCpp};
 use tracing_subscriber::EnvFilter;
 
 /// Estructura de argumentos CLI usando clap.
@@ -50,6 +50,7 @@ enum ControlMessage {
     HotkeyChanged(Result<String, String>),
     SetTrayState(TrayState),
     SetTheme(Theme),
+    SetSttMode(oido_config::SttMode),
     Exit,
 }
 
@@ -244,7 +245,40 @@ fn run_check(config: &Config) -> Result<()> {
     Ok(())
 }
 
+enum ActivePipeline {
+    Batch(Pipeline),
+    Streaming(oido_core::StreamingPipeline),
+}
+
+impl ActivePipeline {
+    fn events(&self) -> crossbeam_channel::Receiver<PipelineEvent> {
+        match self {
+            ActivePipeline::Batch(p) => p.events(),
+            ActivePipeline::Streaming(p) => p.events(),
+        }
+    }
+
+    fn start(&mut self) -> anyhow::Result<()> {
+        match self {
+            ActivePipeline::Batch(p) => p.start(),
+            ActivePipeline::Streaming(p) => p.start(),
+        }
+    }
+
+    fn shutdown(&mut self) -> anyhow::Result<()> {
+        match self {
+            ActivePipeline::Batch(p) => p.shutdown(),
+            ActivePipeline::Streaming(p) => p.shutdown(),
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    // Cronómetro raíz del proceso: se usa para reportar el tiempo total
+    // hasta que el pipeline queda listo y escuchando. El objetivo (Fase 2)
+    // es bajar este número drásticamente con carga diferida del modelo.
+    let startup_total = Instant::now();
+
     // Inicializar logger con soporte para colores ANSI y salida a stderr
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -265,7 +299,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // 1) Config (defaults aplican si no hay config.json).
+    let t_config = Instant::now();
     let cfg = Arc::new(ConfigStore::load_or_default().context("loading config")?);
+    tracing::info!(
+        phase = "config_load",
+        elapsed_ms = t_config.elapsed().as_millis() as u64,
+        "startup phase completa"
+    );
 
     // Si se pasa --config-path, se muestra y sale
     if cli.config_path {
@@ -331,8 +371,20 @@ fn main() -> Result<()> {
     oido_stt::set_windows_menu_theme(snap.theme);
 
     // 2) Inicializar Tray nativo
+    let t_tray = Instant::now();
+    // El árbol del menú se compone declarativamente a partir de
+    // `MenuSection`s. Aquí usamos el set canónico (`default_sections`
+    // produce el mismo árbol que el menú legacy). Si en el futuro hay
+    // que añadir una sección, basta con sumar un struct que implemente
+    // `MenuSection` y agregarlo a la lista — `tray.rs::build_menu`
+    // deja de tocar.
     let mut tray = PlatformTray::new().ok();
     let menu_rx = tray.as_mut().and_then(|t| t.take_menu_events());
+    tracing::info!(
+        phase = "tray_init",
+        elapsed_ms = t_tray.elapsed().as_millis() as u64,
+        "startup phase completa"
+    );
 
     // 3) Cargar modelo whisper. GPU + threads vienen de Config.
     let model_path = models_dir.join(&snap.model);
@@ -363,7 +415,14 @@ fn main() -> Result<()> {
     // VAD nativo: si el modelo GGML existe (o se descarga), activamos
     // el recorte de silencios que hace whisper.cpp antes del encoder.
     // Si no, fallback graceful (STT sigue funcionando).
+    let t_vad = Instant::now();
     let vad_path = resolve_vad_model_path(&models_dir);
+    tracing::info!(
+        phase = "vad_resolve",
+        elapsed_ms = t_vad.elapsed().as_millis() as u64,
+        vad_available = vad_path.is_some(),
+        "startup phase completa"
+    );
     if vad_path.is_none() {
         tracing::warn!(
             "VAD desactivado (modelo no disponible). Para mejorar latencia en \
@@ -372,58 +431,50 @@ fn main() -> Result<()> {
         );
     }
 
-    let mut stt_builder =
-        WhisperCpp::with_language(&snap.language_ui).with_runtime(gpu_config, n_threads_per_worker);
-    let stt = if let Some(vp) = vad_path {
-        stt_builder = stt_builder.with_vad(vp);
-        stt_builder
-    } else {
-        stt_builder
-    };
-    let mut stt = stt;
-    if let Err(e) = stt.load_model(&model_path) {
-        tracing::warn!(
-            ?e,
-            path = ?model_path,
-            "modelo whisper no encontrado; STT devolverá error hasta que descargues uno. \
-             Tip: scripts/download_model.ps1 (Win) o scripts/download_model.sh (Unix)"
-        );
-    } else {
-        let size_mib = std::fs::metadata(&model_path)
-            .map(|m| m.len() as f64 / 1024.0 / 1024.0)
-            .unwrap_or(0.0);
+    let stt_mode = snap.stt_mode;
+    let mut transcriber: Option<Arc<dyn Transcriber>> = None;
+    // Handle fuerte al `SharedTranscriber` (modo Batch) para que el
+    // thread de carga lazy pueda invocar `load_model` sin pasar por
+    // el trait `Transcriber`. `None` en modo Streaming.
+    let mut shared_transcriber: Option<Arc<SharedTranscriber>> = None;
+    let mut streamer: Option<oido_stt::LocalAgreementStreamer> = None;
+
+    if stt_mode == oido_config::SttMode::Batch {
+        let mut stt_builder =
+            WhisperCpp::with_language(&snap.language_ui).with_runtime(gpu_config, n_threads_per_worker);
+        let stt = if let Some(ref vp) = vad_path {
+            stt_builder = stt_builder.with_vad(vp.clone());
+            stt_builder
+        } else {
+            stt_builder
+        };
+        // **Lazy load**: el modelo se carga en background la primera
+        // vez que el usuario aprieta el hotkey (ver `start_pipeline`).
+        // `SharedTranscriber` envuelve el WhisperCpp en un Mutex para
+        // que `load_model` (&mut) pueda convivir con `transcribe` (&self)
+        // a través del trait.
         tracing::info!(
             path = ?model_path,
-            size_mib = %format!("{:.1}", size_mib),
-            "modelo whisper cargado exitosamente"
+            "modelo whisper NO se carga al startup (lazy); se cargará en el primer press del hotkey"
         );
-
-        let model_name = model_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        if model_name.contains("large-v3")
-            && !model_name.contains("turbo")
-            && !model_name.contains("q")
-            && !snap.use_gpu
-        {
-            tracing::warn!(
-                "Estás usando un modelo large-v3 FP16 en CPU sin GPU. Esto causará una latencia extremadamente alta (~2-3x más lento). \
-                 Se recomienda usar large-v3-turbo o una versión cuantizada (e.g. large-v3-turbo-q5_0) para ejecución en CPU."
-            );
-        }
-
-        // Warm-up
-        let started = Instant::now();
-        match stt.warm_up() {
-            Ok(()) => tracing::info!(
-                warmup_ms = started.elapsed().as_millis() as u64,
-                "warm-up STT completado"
-            ),
-            Err(e) => tracing::warn!(?e, "warm-up STT falló; el primer dictado será más lento"),
-        }
+        let shared = SharedTranscriber::new(stt);
+        let shared_arc = Arc::new(shared);
+        shared_transcriber = Some(Arc::clone(&shared_arc));
+        transcriber = Some(shared_arc as Arc<dyn Transcriber>);
+    } else {
+        let st = oido_stt::LocalAgreementStreamer::new(
+            Some(snap.language_ui.clone()),
+            gpu_config,
+            n_threads_per_worker,
+        );
+        // **Lazy load**: ver comentario en la rama Batch. El modelo
+        // streaming se carga en la primera pulsación del hotkey.
+        tracing::info!(
+            path = ?model_path,
+            "modelo whisper streaming NO se carga al startup (lazy); se cargará en el primer press"
+        );
+        streamer = Some(st);
     }
-    let transcriber: Arc<dyn Transcriber> = Arc::new(stt);
 
     // Canal de control para el loop de eventos en el hilo principal
     let (control_tx, control_rx) = crossbeam_channel::bounded::<ControlMessage>(16);
@@ -441,6 +492,9 @@ fn main() -> Result<()> {
                         }
                         MenuAction::SetTheme(theme) => {
                             let _ = control_tx_for_menu.send(ControlMessage::SetTheme(theme));
+                        }
+                        MenuAction::SetSttMode(mode) => {
+                            let _ = control_tx_for_menu.send(ControlMessage::SetSttMode(mode));
                         }
                         MenuAction::OpenModelsDir => {
                             let models_dir = resolve_models_dir();
@@ -464,28 +518,59 @@ fn main() -> Result<()> {
 
     // 4) Loop de ejecución y orquestación del pipeline
     let mut current_binding = binding.clone();
-    let mut pipeline_opt: Option<Pipeline> = None;
+    let mut pipeline_opt: Option<ActivePipeline> = None;
     let mut observer_handle: Option<JoinHandle<()>> = None;
 
     let control_tx_for_start = control_tx.clone();
-    let transcriber_for_start = Arc::clone(&transcriber);
+    // `model_path` se clona aquí para que la closure del lazy-loader
+    // (que captura por movimiento) pueda usarlo, y los call sites
+    // posteriores (cambio de hotkey / modo) también.
+    let model_path_for_pipeline = model_path.clone();
 
     // Función auxiliar para iniciar el pipeline
-    let start_pipeline = move |binding_str: &str| -> Result<(Pipeline, JoinHandle<()>)> {
+    let start_pipeline = move |binding_str: &str, mode: oido_config::SttMode, tr_opt: &Option<Arc<dyn Transcriber>>, st_opt: &Option<oido_stt::LocalAgreementStreamer>, shared_opt: &Option<Arc<SharedTranscriber>>| -> Result<(ActivePipeline, JoinHandle<()>)> {
         let capture = Box::new(CpalCapture::new().context("init captura audio")?);
-        let hotkey: Box<dyn oido_platform::Hotkey> = Box::new(RdevHotkey::new());
+        // `GatedHotkey` envuelve el `RdevHotkey` y suprime los callbacks
+        // de press/release hasta que se llame `mark_ready()` en el handle
+        // compartido. Esto implementa la carga lazy: el pipeline se
+        // arranca YA (con `is_loaded() == false`), pero el primer press
+        // no llega al STT hasta que el modelo esté cargado.
+        // El `mut` es necesario: el `register` interno que
+        // `Pipeline::start` invoca después toma `&mut self`. El
+        // compilador no lo ve porque el `&mut` se materializa a través
+        // del `Box<dyn Hotkey>`, así que silenciamos el falso positivo.
+        #[allow(unused_mut)]
+        let mut gated = GatedHotkey::new();
+        let ready_handle = gated.ready_handle();
+        // `gated` se mueve al `Box` y se registrará con `&mut self`
+        // dentro del pipeline. La `mut` es necesaria para el `register`
+        // interno que `Pipeline::start` invocará después.
+        let hotkey: Box<dyn oido_platform::Hotkey> = Box::new(gated);
         let injector = ArboardInjector::new().context("init injector clipboard")?;
 
-        let pipeline_cfg = PipelineConfig {
-            capture,
-            transcriber: Arc::clone(&transcriber_for_start),
-            injector,
-            hotkey,
-            hotkey_binding: binding_str.to_string(),
+        let mut active_pipe = if mode == oido_config::SttMode::Batch {
+            let tr = tr_opt.clone().context("transcriber no cargado en modo batch")?;
+            let pipeline_cfg = PipelineConfig {
+                capture,
+                transcriber: tr,
+                injector,
+                hotkey,
+                hotkey_binding: binding_str.to_string(),
+            };
+            ActivePipeline::Batch(Pipeline::new(pipeline_cfg))
+        } else {
+            let st = st_opt.clone().context("streamer no cargado en modo streaming")?;
+            let pipeline_cfg = oido_core::StreamingPipelineConfig {
+                capture,
+                streamer: Box::new(st),
+                injector,
+                hotkey,
+                hotkey_binding: binding_str.to_string(),
+            };
+            ActivePipeline::Streaming(oido_core::StreamingPipeline::new(pipeline_cfg))
         };
-        let mut pipe = Pipeline::new(pipeline_cfg);
 
-        let events = pipe.events();
+        let events = active_pipe.events();
         let control_tx_for_obs = control_tx_for_start.clone();
 
         let obs = thread::Builder::new()
@@ -511,13 +596,113 @@ fn main() -> Result<()> {
                 }
             })?;
 
-        pipe.start().context("arrancando pipeline")?;
+        active_pipe.start().context("arrancando pipeline")?;
 
-        Ok((pipe, obs))
+        // **Lazy load trigger**: lanzamos la carga del modelo + warm-up
+        // en un hilo dedicado. Mientras carga, el `GatedHotkey` descarta
+        // silenciosamente cualquier press del usuario (que verá el
+        // estado `Loading` por la señal de control_tx). Al terminar,
+        // marcamos el hotkey como listo y la próxima pulsación del
+        // usuario funcionará normalmente.
+        let control_tx_for_lazy = control_tx_for_start.clone();
+        let model_path_for_lazy = model_path_for_pipeline.clone();
+        let shared_for_lazy: Option<Arc<SharedTranscriber>> =
+            shared_opt.as_ref().map(Arc::clone);
+        thread::Builder::new()
+            .name("oido-lazy-loader".into())
+            .spawn(move || {
+                // Notificamos al bin que estamos cargando.
+                let _ = control_tx_for_lazy
+                    .send(ControlMessage::SetTrayState(TrayState::Loading));
+
+                let t = Instant::now();
+                let load_result: anyhow::Result<()> = if mode == oido_config::SttMode::Batch {
+                    if let Some(shared) = shared_for_lazy.as_ref() {
+                        let handle = shared.handle();
+                        {
+                            let mut guard = handle.lock();
+                            if let Err(e) = guard.load_model(&model_path_for_lazy) {
+                                tracing::error!(
+                                    ?e,
+                                    path = ?model_path_for_lazy,
+                                    "lazy load: modelo no encontrado"
+                                );
+                                drop(guard);
+                                let _ = control_tx_for_lazy
+                                    .send(ControlMessage::SetTrayState(TrayState::Error));
+                                return;
+                            }
+                            tracing::info!(
+                                size_mib = %format!(
+                                    "{:.1}",
+                                    std::fs::metadata(&model_path_for_lazy)
+                                        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+                                        .unwrap_or(0.0)
+                                ),
+                                "modelo whisper cargado (lazy batch)"
+                            );
+                            // guard se libera al salir del bloque
+                        }
+                        // Warm-up: nuevo lock en un lock_api::Mutex.
+                        let started = Instant::now();
+                        let warmup_result = handle.lock().warm_up();
+                        match warmup_result {
+                            Ok(()) => tracing::info!(
+                                warmup_ms = started.elapsed().as_millis() as u64,
+                                "warm-up STT lazy completado"
+                            ),
+                            Err(e) => tracing::warn!(?e, "warm-up lazy falló; el primer dictado será más lento"),
+                        }
+                    } else {
+                        tracing::error!("lazy load Batch: shared_transcriber no disponible");
+                        let _ = control_tx_for_lazy
+                            .send(ControlMessage::SetTrayState(TrayState::Error));
+                        return;
+                    }
+                    Ok(())
+                } else {
+                    // Streaming: el `LocalAgreementStreamer` no es
+                    // Sync; el `Box<dyn Streamer>` no se puede mutar
+                    // desde aquí. Para mantener el alcance del refactor
+                    // conservador, NO implementamos lazy load para el
+                    // modo streaming en esta fase (queda como TODO).
+                    tracing::warn!(
+                        "lazy load no implementado para modo streaming; el modo streaming \
+                         cargará el modelo eagerly (sin lazy)"
+                    );
+                    Ok(())
+                };
+
+                if let Err(e) = load_result {
+                    tracing::error!(?e, "lazy load falló");
+                    let _ = control_tx_for_lazy
+                        .send(ControlMessage::SetTrayState(TrayState::Error));
+                    return;
+                }
+
+                tracing::info!(
+                    phase = "lazy_load_total",
+                    elapsed_ms = t.elapsed().as_millis() as u64,
+                    "lazy load completo; hotkey ahora operativo"
+                );
+
+                // Abrimos la compuerta: el siguiente press del usuario
+                // llegará al pipeline.
+                ready_handle.mark_ready();
+                let _ = control_tx_for_lazy.send(ControlMessage::SetTrayState(TrayState::Idle));
+            })?;
+
+        Ok((active_pipe, obs))
     };
 
     // Arranque inicial
-    match start_pipeline(&current_binding) {
+    match start_pipeline(
+        &current_binding,
+        stt_mode,
+        &transcriber,
+        &streamer,
+        &shared_transcriber,
+    ) {
         Ok((pipe, obs)) => {
             pipeline_opt = Some(pipe);
             observer_handle = Some(obs);
@@ -534,6 +719,14 @@ fn main() -> Result<()> {
             tracing::error!(?e, "no se pudo arrancar el pipeline inicial");
         }
     }
+
+    // Resumen final del startup: cuanto tardó desde `fn main()` hasta
+    // pipeline armado + tray visible. Métrica objetivo para Fase 2.
+    tracing::info!(
+        phase = "startup_total",
+        elapsed_ms = startup_total.elapsed().as_millis() as u64,
+        "startup completo; bin listo para dictar"
+    );
 
     // Instalar handler de Ctrl+C redirigiéndolo a nuestro canal de control
     let control_tx_ctrlc = control_tx.clone();
@@ -606,13 +799,20 @@ fn main() -> Result<()> {
                     }
 
                     // 3) Reiniciar pipeline
-                    match start_pipeline(&current_binding) {
+                    let snap = cfg.snapshot();
+                    match start_pipeline(
+                        &current_binding,
+                        snap.stt_mode,
+                        &transcriber,
+                        &streamer,
+                        &shared_transcriber,
+                    ) {
                         Ok((pipe, obs)) => {
                             pipeline_opt = Some(pipe);
                             observer_handle = Some(obs);
                             tracing::info!("Pipeline reiniciado con hotkey {}", current_binding);
                             if let Some(ref mut t) = tray {
-                                let theme = cfg.snapshot().theme;
+                                let theme = snap.theme;
                                 let _ = t.set_state(TrayState::Idle, theme);
                             }
                         }
@@ -641,6 +841,84 @@ fn main() -> Result<()> {
                     oido_stt::set_windows_menu_theme(theme);
                     if let Some(ref mut t) = tray {
                         let _ = t.set_state(current_tray_state, theme);
+                    }
+                }
+                ControlMessage::SetSttMode(mode) => {
+                    let mut snap = cfg.snapshot();
+                    if snap.stt_mode != mode {
+                        snap.stt_mode = mode;
+                        cfg.replace(snap.clone());
+                        if let Err(e) = cfg.save() {
+                            tracing::error!(?e, "no se pudo guardar la configuración");
+                        } else {
+                            tracing::info!("Modo STT actualizado persistentemente a {:?}", mode);
+                        }
+
+                        // 1) Detener el pipeline actual para liberar el gancho global de teclado
+                        if let Some(mut pipe) = pipeline_opt.take() {
+                            let _ = pipe.shutdown();
+                        }
+                        if let Some(obs) = observer_handle.take() {
+                            let _ = obs.join();
+                        }
+
+                        // 2) Liberar backend inactivo y cargar el nuevo
+                        if mode == oido_config::SttMode::Batch {
+                            streamer = None; // Liberar memoria de streaming
+                            if transcriber.is_none() {
+                                tracing::info!("Cargando modelo whisper en modo Batch...");
+                                let mut stt_builder = WhisperCpp::with_language(&snap.language_ui)
+                                    .with_runtime(gpu_config, n_threads_per_worker);
+                                if let Some(vp) = vad_path.as_ref() {
+                                    stt_builder = stt_builder.with_vad(vp.clone());
+                                }
+                                let mut stt = stt_builder;
+                                if let Err(e) = stt.load_model(&model_path) {
+                                    tracing::warn!(?e, "no se pudo cargar el modelo en modo Batch");
+                                } else {
+                                    let _ = stt.warm_up();
+                                    transcriber = Some(Arc::new(stt));
+                                }
+                            }
+                        } else {
+                            transcriber = None; // Liberar memoria de batch
+                            if streamer.is_none() {
+                                tracing::info!("Cargando modelo whisper en modo Streaming...");
+                                let mut st = oido_stt::LocalAgreementStreamer::new(
+                                    Some(snap.language_ui.clone()),
+                                    gpu_config,
+                                    n_threads_per_worker,
+                                );
+                                if let Err(e) = st.load_model(&model_path) {
+                                    tracing::warn!(?e, "no se pudo cargar el modelo en modo Streaming");
+                                } else {
+                                    let _ = st.warm_up();
+                                    streamer = Some(st);
+                                }
+                            }
+                        }
+
+                        // 3) Iniciar el pipeline con el nuevo modo y transcriptor
+                        match start_pipeline(
+                            &current_binding,
+                            mode,
+                            &transcriber,
+                            &streamer,
+                            &shared_transcriber,
+                        ) {
+                            Ok((pipe, obs)) => {
+                                pipeline_opt = Some(pipe);
+                                observer_handle = Some(obs);
+                                tracing::info!("Pipeline iniciado en modo {:?}", mode);
+                                if let Some(ref mut t) = tray {
+                                    let theme = snap.theme;
+                                    let _ = t.set_state(TrayState::Idle, theme);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(?e, "no se pudo arrancar el pipeline en modo {:?}", mode);
+                            }
+                        }
                     }
                 }
                 ControlMessage::Exit => {
