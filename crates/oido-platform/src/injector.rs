@@ -93,4 +93,13 @@ impl Injector for ArboardInjector {
         // Fase 1 no lo reintenta (YAGNI retry).
         Ok(())
     }
+
+    fn type_text(&self, text: &str) -> Result<(), PlatformError> {
+        let mut inner = self.inner.lock();
+        inner
+            .enigo
+            .text(text)
+            .map_err(|e| PlatformError::Inject(format!("enigo text: {e}")))?;
+        Ok(())
+    }
 }

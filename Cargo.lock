@@ -2423,6 +2423,7 @@ version = "0.1.0"
 dependencies = [
  "dark-light",
  "oido-config",
+ "parking_lot",
  "serde",
  "thiserror 1.0.69",
  "tracing",

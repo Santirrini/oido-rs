@@ -27,6 +27,18 @@ fn default_theme() -> Theme {
     Theme::System
 }
 
+/// Modo de transcripción de audio (Batch o Streaming).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SttMode {
+    Batch,
+    Streaming,
+}
+
+fn default_stt_mode() -> SttMode {
+    SttMode::Batch
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -54,6 +66,9 @@ pub struct Config {
     /// Tema de la interfaz de bandeja. Default: `System` (sigue al OS).
     #[serde(default = "default_theme")]
     pub theme: Theme,
+    /// Modo de transcripción. Default: `Batch` (por lotes, hold-to-talk clásico).
+    #[serde(default = "default_stt_mode")]
+    pub stt_mode: SttMode,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
@@ -74,6 +89,7 @@ impl Default for Config {
             use_gpu: default_use_gpu(),
             n_threads: None,
             theme: default_theme(),
+            stt_mode: default_stt_mode(),
         }
     }
 }
@@ -171,15 +187,17 @@ mod tests {
                 any::<bool>(),
                 proptest::option::of(1u16..=16),
                 proptest::sample::select(vec![Theme::Dark, Theme::Light, Theme::System]),
+                proptest::sample::select(vec![SttMode::Batch, SttMode::Streaming]),
             )
                 .prop_map(
-                    |(hotkey, model, language_ui, use_gpu, n_threads, theme)| Self {
+                    |(hotkey, model, language_ui, use_gpu, n_threads, theme, stt_mode)| Self {
                         hotkey,
                         model,
                         language_ui,
                         use_gpu,
                         n_threads,
                         theme,
+                        stt_mode,
                     },
                 )
                 .boxed()
@@ -193,6 +211,7 @@ mod tests {
         assert_eq!(cfg.model, "ggml-base.bin");
         assert_eq!(cfg.language_ui, "es");
         assert!(cfg.n_threads.is_none());
+        assert_eq!(cfg.stt_mode, SttMode::Batch);
     }
 
     #[test]
@@ -212,6 +231,7 @@ mod tests {
         assert_eq!(cfg.hotkey, "F9");
         assert_eq!(cfg.use_gpu, default_use_gpu());
         assert!(cfg.n_threads.is_none());
+        assert_eq!(cfg.stt_mode, SttMode::Batch);
     }
 
     #[test]
