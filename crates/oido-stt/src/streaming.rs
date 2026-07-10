@@ -23,6 +23,12 @@ pub trait Streamer: Send + std::fmt::Debug {
     fn process(&mut self, audio: &[f32]) -> Result<PartialTranscript, SttError>;
     fn flush_final(&mut self) -> Result<PartialTranscript, SttError>;
     fn reset(&mut self);
+
+    /// Indica si el modelo whisper está cargado. Default: `true`.
+    /// Los backends con carga lazy lo sobrescriben.
+    fn is_loaded(&self) -> bool {
+        true
+    }
 }
 
 /// Transcriptor en streaming basado en LocalAgreement-2.
@@ -254,6 +260,11 @@ impl Streamer for LocalAgreementStreamer {
 
     fn reset(&mut self) {
         self.reset();
+    }
+
+    fn is_loaded(&self) -> bool {
+        // Lazy load: el contexto whisper se materializa en `load_model`.
+        self.ctx.is_some()
     }
 }
 

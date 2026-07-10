@@ -24,6 +24,7 @@ thiserror.workspace = true
 tracing.workspace = true
 oido-config = { path = "../oido-config", version = "0.1.0" }
 dark-light.workspace = true
+parking_lot.workspace = true
 
 # Fase 1: whisper-rs enlaza y compila whisper.cpp estáticamente. Build
 # pesa bastante (cmake + toolchain C++); ver CI install steps.

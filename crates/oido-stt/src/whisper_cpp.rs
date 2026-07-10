@@ -370,6 +370,13 @@ impl Transcriber for WhisperCpp {
         );
         Ok(())
     }
+
+    fn is_loaded(&self) -> bool {
+        // Lazy load: el contexto whisper se materializa en `load_model`.
+        // Mientras `ctx == None`, el backend todavía no leyó el archivo
+        // GGML y no puede transcribir.
+        self.ctx.is_some()
+    }
 }
 
 /// Procesa de forma no bloqueante la cola de mensajes de Win32 para bombear los

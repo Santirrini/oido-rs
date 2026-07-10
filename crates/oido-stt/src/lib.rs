@@ -18,7 +18,10 @@ pub use whisper_cpp::{GpuConfig, WhisperCpp};
 pub use streaming::{LocalAgreementStreamer, PartialTranscript, Streamer};
 
 use std::fmt::Debug;
+use std::path::Path;
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -50,6 +53,17 @@ pub trait Transcriber: Send + Sync + std::fmt::Debug {
     fn warm_up(&self) -> Result<(), SttError> {
         Ok(())
     }
+
+    /// Indica si el modelo ya está cargado en memoria y listo para
+    /// transcribir. Default: `true` (backends con carga eager se
+    /// consideran siempre listos; los que soportan lazy load lo
+    /// implementan y devuelven `false` hasta que `load_model` corra).
+    ///
+    /// Esto permite al bin diferir la carga del modelo a la primera
+    /// pulsación del hotkey en lugar de bloquear el startup.
+    fn is_loaded(&self) -> bool {
+        true
+    }
 }
 
 /// Constructor factory retornado por el backend. La selección de
@@ -59,4 +73,54 @@ pub trait TranscriberFactory: Send + Sync {
     type Backend: Transcriber;
 
     fn create(&self, model_path: &std::path::Path) -> Result<Self::Backend, SttError>;
+}
+
+/// Wrapper `Arc<Mutex<WhisperCpp>>` que implementa `Transcriber`
+/// permitiendo cargar el modelo en background (lazy load) sin romper
+/// la API inmutable del trait. `load_model` toma el lock por `&mut`,
+/// `transcribe`/`warm_up`/`is_loaded` lo toman por `&` (el bloqueo es
+/// de corta duración — solo durante la inferencia).
+pub struct SharedTranscriber {
+    inner: Arc<Mutex<WhisperCpp>>,
+}
+
+impl SharedTranscriber {
+    #[must_use]
+    pub fn new(stt: WhisperCpp) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(stt)),
+        }
+    }
+
+    /// Comparte el handle al `WhisperCpp` interno. Útil para que un
+    /// thread de carga lazy invoque `load_model` sin pasar por el
+    /// trait.
+    #[must_use]
+    pub fn handle(&self) -> Arc<Mutex<WhisperCpp>> {
+        Arc::clone(&self.inner)
+    }
+}
+
+impl Debug for SharedTranscriber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedTranscriber").finish()
+    }
+}
+
+impl Transcriber for SharedTranscriber {
+    fn transcribe(&self, audio: &[f32]) -> Result<String, SttError> {
+        self.inner.lock().transcribe(audio)
+    }
+
+    fn load_model(&mut self, model_path: &Path) -> Result<(), SttError> {
+        self.inner.lock().load_model(model_path)
+    }
+
+    fn warm_up(&self) -> Result<(), SttError> {
+        self.inner.lock().warm_up()
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.inner.lock().is_loaded()
+    }
 }

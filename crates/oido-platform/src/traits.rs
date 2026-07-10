@@ -72,11 +72,15 @@ pub enum TrayState {
     Listening,
     Processing,
     Paused,
+    /// Modelo whisper cargando de forma lazy. El hotkey queda
+    /// registrado pero el primer dictado se difiere hasta que termine
+    /// la carga + warm-up.
+    Loading,
     Error,
 }
 
 /// Acciones que puede disparar el menú nativo de bandeja.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     ChangeHotkey,
     SetTheme(Theme),

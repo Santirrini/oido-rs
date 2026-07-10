@@ -102,6 +102,25 @@ pub fn render_state(state: TrayState, theme: Theme) -> RgbaIcon {
             // X sobre el cuerpo del micrófono
             draw_x(&mut buf, mic_cx, mic_cy_top + 9, 7, palette.overlay);
         }
+        TrayState::Loading => {
+            // Anillo segmentado (3 arcos separados) para sugerir progreso
+            // de la carga lazy del modelo. Visual estático, sin animación
+            // (los iconos de bandeja no se redibujan frame a frame aquí).
+            for i in 0u32..3 {
+                let start_angle = std::f32::consts::PI * (i as f32 * 0.66);
+                let end_angle = start_angle + std::f32::consts::PI * 0.5;
+                draw_arc_segment(
+                    &mut buf,
+                    mic_cx,
+                    mic_cy_top + 9,
+                    16,
+                    2,
+                    start_angle,
+                    end_angle,
+                    palette.overlay,
+                );
+            }
+        }
     }
 
     RgbaIcon {
@@ -128,6 +147,7 @@ fn choose_palette(state: TrayState, theme: Theme) -> Palette {
         TrayState::Processing => ([0xFF, 0x98, 0x00], [0xFF, 0xFF, 0xFF]),
         TrayState::Paused => ([0x80, 0x80, 0x80], [0xFF, 0xFF, 0xFF]),
         TrayState::Error => ([0xB7, 0x1C, 0x1C], [0xFF, 0xFF, 0xFF]),
+        TrayState::Loading => ([0x60, 0x80, 0xB0], [0xFF, 0xFF, 0xFF]),
     };
 
     // Light mode: overlay negro para contrastar sobre taskbar blanca.
@@ -235,6 +255,55 @@ fn draw_arc_bottom(buf: &mut [u8], cx: u32, cy: u32, r_outer: u32, r_inner: u32,
     }
 }
 
+/// Arco centrado en (cx, cy) entre los ángulos `start` y `end` (radianes,
+/// 0 = +x, creciendo CCW). Rellena el grosor entre `r_outer` y `r_inner`.
+/// Se usa para el estado `Loading` (anillo de progreso estático).
+fn draw_arc_segment(
+    buf: &mut [u8],
+    cx: u32,
+    cy: u32,
+    r_outer: u32,
+    thickness: u32,
+    start: f32,
+    end: f32,
+    color: [u8; 4],
+) {
+    let r_inner = r_outer.saturating_sub(thickness);
+    let ro2 = (r_outer * r_outer) as i64;
+    let ri2 = (r_inner * r_inner) as i64;
+    let r = r_outer as i32;
+    let cx = cx as i32;
+    let cy = cy as i32;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = (dx * dx + dy * dy) as i64;
+            if d2 > ro2 || d2 < ri2 {
+                continue;
+            }
+            // atan2 en el sistema (dx, dy); usamos Y invertida para que
+            // 0 radianes apunte a la derecha y crezca CCW en pantalla.
+            let angle = libm_wrap_atan2(-dy as f32, dx as f32);
+            if angle >= start && angle <= end {
+                let px = cx + dx;
+                let py = cy + dy;
+                if px >= 0 && py >= 0 {
+                    set_pixel(buf, px as u32, py as u32, color);
+                }
+            }
+        }
+    }
+}
+
+/// `atan2` reducido a `[0, 2π)` sin depender de `libm` (no usamos
+/// ninguna feature nightly).
+fn libm_wrap_atan2(y: f32, x: f32) -> f32 {
+    let mut a = y.atan2(x);
+    if a < 0.0 {
+        a += std::f32::consts::TAU;
+    }
+    a
+}
+
 /// X centrada en (cx, cy) con semiancho `half`.
 fn draw_x(buf: &mut [u8], cx: u32, cy: u32, half: u32, color: [u8; 4]) {
     let half = half as i32;
@@ -278,6 +347,7 @@ mod tests {
             TrayState::Processing,
             TrayState::Paused,
             TrayState::Error,
+            TrayState::Loading,
         ] {
             let icon = render_state(state, Theme::Dark);
             assert_eq!(

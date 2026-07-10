@@ -48,6 +48,7 @@ pub type TextTx = Sender<String>;
 pub type TextRx = Receiver<String>;
 
 pub mod capture;
+pub mod gate;
 pub mod hotkey;
 pub mod icon;
 pub mod injector;
@@ -56,6 +57,7 @@ pub mod traits;
 pub mod tray;
 
 pub use capture::Resampler;
+pub use gate::{GatedHotkey, GatedReadyHandle};
 pub use hotkey::RdevHotkey;
 pub use oido_config::Theme;
 pub use traits::{CaptureSource, Hotkey, Injector, MenuAction, PlatformError, Tray, TrayState};
