@@ -33,7 +33,7 @@ Write-Host "Version extracted: $version"
 
 # 5. Compile WiX installer
 Write-Host "Compiling installer with candle..."
-& candle.exe -dVersion=$version -o "installer/staging/" "installer/oido.wxs"
+& candle.exe "-dVersion=$version" -o "installer/staging/" "installer/oido.wxs"
 if ($LastExitCode -ne 0) { throw "candle.exe failed with exit code $LastExitCode" }
 
 Write-Host "Linking installer with light..."
