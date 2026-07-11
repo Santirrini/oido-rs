@@ -616,61 +616,60 @@ fn main() -> Result<()> {
 
     // `is_downloading_at_startup` se asigna a `true` únicamente en la
     // rama windows (vía el bloque cfg-gated más abajo). En linux/macos
-    // permanece `false` y un `let mut` sería unused en -D warnings. La
-    // solución: declararla como `let` (no `mut`) y calcular su valor
-    // en un closure cfg-gated que retorna el bool. En windows el
-    // closure hace la mutación local; en linux/macos retorna `false`
-    // sin tocar nada. `model_missing` y `has_no_bins` se mantienen
-    // fuera del closure porque también se consultan después, al
-    // construir el estado inicial del tray.
+    // permanece `false` y un `let mut` sería unused en -D warnings.
+    //
+    // Para evitar esto declaramos la variable en cada rama con su
+    // propio `let`. En windows: `let mut ... = false` y se muta
+    // dentro del bloque. En linux/macos: `let ... = false` (sin
+    // mut). El bloque de "scope" compartido (`model_missing` y
+    // `has_no_bins`) y el cómputo del bool se hacen con un match
+    // cfg-gated que produce el mismo nombre.
     let model_missing = !models_dir.join(&snap.model).exists();
     let has_no_bins = has_no_bin_files(&models_dir);
-    let is_downloading_at_startup: bool = {
-        let mut downloading = false;
 
-        #[cfg(target_os = "windows")]
-        {
-            if (has_no_bins || model_missing) && show_model_prompt_windows() {
-                downloading = true;
-                let entry = oido_models::find("ggml-base.bin").cloned();
-                if let Some(entry) = entry {
-                    let tx = control_tx.clone();
-                    let dir = models_dir.clone();
-                    let shared_for_dl = shared_transcriber.as_ref().map(Arc::clone);
-                    let cfg_for_dl = Arc::clone(&cfg);
-                    let span =
-                        tracing::info_span!("download_model_startup", filename = "ggml-base.bin");
-                    let _ =
-                        thread::Builder::new()
-                            .name("oido-downloader".into())
-                            .spawn(move || {
-                                let _enter = span.enter();
-                                tracing::info!("Descargando ggml-base.bin desde el inicio...");
-                                match oido_models::download_model(&dir, &entry, None) {
-                                    Ok(()) => {
-                                        tracing::info!("descarga de inicio completa");
-                                        let _ = tx.send(ControlMessage::RefreshMenu);
-                                        activate_after_download(
-                                            &entry.filename,
-                                            &dir,
-                                            &cfg_for_dl,
-                                            shared_for_dl.as_ref(),
-                                            &tx,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(?e, "descarga de inicio falló");
-                                        let _ =
-                                            tx.send(ControlMessage::SetTrayState(TrayState::Error));
-                                    }
-                                }
-                            });
-                }
+    #[cfg(target_os = "windows")]
+    let mut is_downloading_at_startup = false;
+    #[cfg(not(target_os = "windows"))]
+    let is_downloading_at_startup = false;
+
+    #[cfg(target_os = "windows")]
+    {
+        if (has_no_bins || model_missing) && show_model_prompt_windows() {
+            is_downloading_at_startup = true;
+            let entry = oido_models::find("ggml-base.bin").cloned();
+            if let Some(entry) = entry {
+                let tx = control_tx.clone();
+                let dir = models_dir.clone();
+                let shared_for_dl = shared_transcriber.as_ref().map(Arc::clone);
+                let cfg_for_dl = Arc::clone(&cfg);
+                let span =
+                    tracing::info_span!("download_model_startup", filename = "ggml-base.bin");
+                let _ = thread::Builder::new()
+                    .name("oido-downloader".into())
+                    .spawn(move || {
+                        let _enter = span.enter();
+                        tracing::info!("Descargando ggml-base.bin desde el inicio...");
+                        match oido_models::download_model(&dir, &entry, None) {
+                            Ok(()) => {
+                                tracing::info!("descarga de inicio completa");
+                                let _ = tx.send(ControlMessage::RefreshMenu);
+                                activate_after_download(
+                                    &entry.filename,
+                                    &dir,
+                                    &cfg_for_dl,
+                                    shared_for_dl.as_ref(),
+                                    &tx,
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(?e, "descarga de inicio falló");
+                                let _ = tx.send(ControlMessage::SetTrayState(TrayState::Error));
+                            }
+                        }
+                    });
             }
         }
-
-        downloading
-    };
+    }
 
     // Arranque inicial
     match start_pipeline(
