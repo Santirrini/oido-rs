@@ -15,9 +15,11 @@ use oido_hotkey::{parse as parse_hotkey, GatedHotkey, Hotkey};
 use oido_input::ArboardInjector;
 use oido_stt::{GpuConfig, SharedTranscriber, Transcriber, WhisperCpp};
 use oido_tray::{
-    default_sections, enable_dpi_awareness, show_model_prompt_windows, BuildContext, MenuAction,
-    PlatformTray, Tray, TrayState,
+    default_sections, enable_dpi_awareness, BuildContext, MenuAction, PlatformTray, Tray, TrayState,
 };
+// `show_model_prompt_windows` sólo existe en la rama windows de oido-tray.
+#[cfg(target_os = "windows")]
+use oido_tray::show_model_prompt_windows;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
