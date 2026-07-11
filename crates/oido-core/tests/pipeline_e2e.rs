@@ -21,8 +21,10 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
+use oido_audio::{AudioError, AudioFrame, CaptureSource};
 use oido_core::{Pipeline, PipelineConfig, PipelineEvent, PipelineState};
-use oido_platform::{AudioFrame, CaptureSource, Hotkey, Injector, PlatformError};
+use oido_hotkey::{Hotkey, HotkeyError};
+use oido_input::{InjectError, Injector};
 use oido_stt::{SttError, Transcriber};
 
 // ----- Mock capture ---------------------------------------------------------
@@ -82,14 +84,14 @@ impl MockCaptureHandle {
 }
 
 impl CaptureSource for MockCapture {
-    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), PlatformError> {
+    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), AudioError> {
         *self.inner.sink.lock() = Some(sink);
         Ok(())
     }
-    fn start(&mut self) -> Result<(), PlatformError> {
+    fn start(&mut self) -> Result<(), AudioError> {
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), PlatformError> {
+    fn stop(&mut self) -> Result<(), AudioError> {
         // Importante para que el consumer thread termine su `recv()`
         // con `Err` y salga del loop.
         *self.inner.sink.lock() = None;
@@ -168,16 +170,16 @@ impl Hotkey for MockHotkey {
         binding: &str,
         on_press: Box<dyn Fn() + Send + 'static>,
         on_release: Box<dyn Fn() + Send + 'static>,
-    ) -> Result<(), PlatformError> {
+    ) -> Result<(), HotkeyError> {
         // El mock ignora el binding (no tiene OS-level semantics); los
-        // tests del parser en `oido-platform::hotkey` ejercitan la
+        // tests del parser en `oido_hotkey::hotkey` ejercitan la
         // conversión `&str → (Modifiers, Code)` independientemente.
         let _ = binding;
         *self.inner.on_press.lock() = Some(on_press);
         *self.inner.on_release.lock() = Some(on_release);
         Ok(())
     }
-    fn unregister(&mut self) -> Result<(), PlatformError> {
+    fn unregister(&mut self) -> Result<(), HotkeyError> {
         *self.inner.on_press.lock() = None;
         *self.inner.on_release.lock() = None;
         Ok(())
@@ -292,7 +294,7 @@ impl MockInjectorHandle {
 }
 
 impl Injector for MockInjector {
-    fn inject(&self, text: &str) -> Result<(), PlatformError> {
+    fn inject(&self, text: &str) -> Result<(), InjectError> {
         self.inner.texts.lock().push(text.to_owned());
         Ok(())
     }

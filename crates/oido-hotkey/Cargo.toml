@@ -1,0 +1,20 @@
+[package]
+name = "oido-hotkey"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Registro global de combinaciones de teclas (rdev::grab) con supresión selectiva. 100% Safe Rust."
+
+[lints]
+workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+oido-config = { path = "../oido-config", version = "0.1.0" }
+global-hotkey.workspace = true
+rdev = { workspace = true, features = ["unstable_grab"] }

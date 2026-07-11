@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::hotkey::RdevHotkey;
-use crate::traits::{Hotkey, PlatformError};
+use crate::{Hotkey, HotkeyError};
 
 /// Hotkey con compuerta: los callbacks no se invocan hasta `mark_ready`.
 #[derive(Debug)]
@@ -69,7 +69,7 @@ impl Hotkey for GatedHotkey {
         binding: &str,
         on_press: Box<dyn Fn() + Send + 'static>,
         on_release: Box<dyn Fn() + Send + 'static>,
-    ) -> Result<(), PlatformError> {
+    ) -> Result<(), HotkeyError> {
         // Envolvemos los callbacks del usuario en un check del flag.
         // Antes de ready, el press/release se ignora silenciosamente.
         let ready_press = Arc::clone(&self.ready);
@@ -91,7 +91,7 @@ impl Hotkey for GatedHotkey {
         self.inner.register(binding, on_press, on_release)
     }
 
-    fn unregister(&mut self) -> Result<(), PlatformError> {
+    fn unregister(&mut self) -> Result<(), HotkeyError> {
         self.inner.unregister()
     }
 }

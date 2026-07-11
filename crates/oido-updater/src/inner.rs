@@ -1,5 +1,3 @@
-#![cfg(feature = "updater")]
-
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::File;

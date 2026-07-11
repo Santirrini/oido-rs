@@ -2074,7 +2074,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3108,21 +3107,32 @@ dependencies = [
  "crossbeam-channel",
  "ctrlc",
  "dirs 5.0.1",
- "hex",
+ "oido-audio",
  "oido-config",
  "oido-core",
+ "oido-hotkey",
+ "oido-input",
  "oido-models",
- "oido-platform",
  "oido-stt",
+ "oido-tray",
+ "oido-updater",
  "open",
  "parking_lot",
- "reqwest 0.12.28",
- "self_update",
- "serde",
- "sha2",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "oido-audio"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "crossbeam-channel",
+ "oido-config",
+ "rubato",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -3145,12 +3155,38 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "oido-audio",
  "oido-config",
- "oido-platform",
+ "oido-hotkey",
+ "oido-input",
  "oido-stt",
  "parking_lot",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "oido-hotkey"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "global-hotkey",
+ "oido-config",
+ "parking_lot",
+ "rdev",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "oido-input"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "enigo",
+ "parking_lot",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -3162,7 +3198,7 @@ dependencies = [
  "hex",
  "httpmock",
  "oido-config",
- "reqwest 0.12.28",
+ "reqwest",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
@@ -3171,23 +3207,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "oido-platform"
+name = "oido-stt"
 version = "0.1.0"
 dependencies = [
- "arboard",
- "cpal",
+ "parking_lot",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+ "whisper-rs",
+]
+
+[[package]]
+name = "oido-tray"
+version = "0.1.0"
+dependencies = [
  "crossbeam-channel",
  "dark-light",
- "enigo",
- "global-hotkey",
  "ksni",
  "muda 0.15.3",
  "oido-config",
  "oido-models",
- "oido-stt",
  "parking_lot",
- "rdev",
- "rubato",
  "serde",
  "tempfile",
  "thiserror 1.0.69",
@@ -3197,17 +3237,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "oido-stt"
+name = "oido-updater"
 version = "0.1.0"
 dependencies = [
- "dark-light",
- "oido-config",
- "parking_lot",
+ "anyhow",
+ "hex",
+ "reqwest",
+ "self_update",
  "serde",
- "thiserror 1.0.69",
+ "sha2",
  "tracing",
- "whisper-rs",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3849,48 +3888,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-channel",
- "futures-core",
- "futures-util",
- "http 1.4.2",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.10.1",
- "hyper-rustls",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "quinn",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams",
- "web-sys",
- "webpki-roots",
-]
-
-[[package]]
-name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
@@ -3920,12 +3917,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -4103,12 +4102,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryu"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4177,7 +4170,7 @@ dependencies = [
  "log",
  "quick-xml",
  "regex",
- "reqwest 0.13.4",
+ "reqwest",
  "self-replace",
  "semver",
  "serde",
@@ -4263,18 +4256,6 @@ version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde_urlencoded"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
-dependencies = [
- "form_urlencoded",
- "itoa",
- "ryu",
  "serde",
 ]
 
@@ -5205,9 +5186,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-streams"
-version = "0.4.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
 dependencies = [
  "futures-util",
  "js-sys",

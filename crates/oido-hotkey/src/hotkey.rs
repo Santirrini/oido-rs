@@ -78,7 +78,7 @@ use global_hotkey::hotkey::{Code, HotKey as GHKey, Modifiers};
 use rdev::{Event, EventType};
 
 use crate::key_grab::{key_to_code, key_to_modifier};
-use crate::traits::{Hotkey, PlatformError};
+use crate::{Hotkey, HotkeyError};
 
 /// Ventana durante la cual un press de modificador se considera "parte"
 /// de la combinación que el usuario está formando. Igual que en
@@ -101,7 +101,6 @@ pub struct RdevHotkey {
     /// Binding actualmente registrado (para diagnostics y para evitar
     /// re-registros accidentales).
     active: Option<(Modifiers, Code)>,
-    win32_thread_id: Option<u32>,
 }
 
 impl fmt::Debug for RdevHotkey {
@@ -109,7 +108,6 @@ impl fmt::Debug for RdevHotkey {
         f.debug_struct("RdevHotkey")
             .field("active", &self.active)
             .field("listener_alive", &self.listener.is_some())
-            .field("win32_thread_id", &self.win32_thread_id)
             .finish()
     }
 }
@@ -127,7 +125,6 @@ impl RdevHotkey {
             listener: None,
             running: Arc::new(AtomicBool::new(false)),
             active: None,
-            win32_thread_id: None,
         }
     }
 
@@ -139,7 +136,7 @@ impl RdevHotkey {
 
     /// Parsea `binding` y devuelve el par `(mods, code)` que el listener
     /// usará para matching. Útil para tests.
-    pub fn parse_target(&self, binding: &str) -> Result<(Modifiers, Code), PlatformError> {
+    pub fn parse_target(&self, binding: &str) -> Result<(Modifiers, Code), HotkeyError> {
         parse(binding)
     }
 }
@@ -150,9 +147,9 @@ impl Hotkey for RdevHotkey {
         binding: &str,
         on_press: Box<dyn Fn() + Send + 'static>,
         on_release: Box<dyn Fn() + Send + 'static>,
-    ) -> Result<(), PlatformError> {
+    ) -> Result<(), HotkeyError> {
         if self.listener.is_some() {
-            return Err(PlatformError::Hotkey(
+            return Err(HotkeyError::Hotkey(
                 "register: ya hay un listener activo; llama a unregister primero".into(),
             ));
         }
@@ -162,7 +159,6 @@ impl Hotkey for RdevHotkey {
 
         let (press_tx, press_rx) = crossbeam_channel::unbounded::<()>();
         let (release_tx, release_rx) = crossbeam_channel::unbounded::<()>();
-        let (tid_tx, tid_rx) = crossbeam_channel::bounded::<u32>(1);
 
         let running = Arc::clone(&self.running);
         running.store(true, Ordering::SeqCst);
@@ -179,17 +175,9 @@ impl Hotkey for RdevHotkey {
                     press_tx,
                     release_tx,
                     running,
-                    tid_tx,
                 )
             })
-            .map_err(|e| PlatformError::Hotkey(format!("spawn listener: {e}")))?;
-
-        // Esperar el ID del hilo Win32
-        let win32_thread_id = match tid_rx.recv() {
-            Ok(tid) if tid != 0 => Some(tid),
-            _ => None,
-        };
-        self.win32_thread_id = win32_thread_id;
+            .map_err(|e| HotkeyError::Hotkey(format!("spawn listener: {e}")))?;
 
         // Hilos demux que invocan los closures boxed. Mismo patrón que
         // en el backend anterior.
@@ -200,7 +188,7 @@ impl Hotkey for RdevHotkey {
                     on_press();
                 }
             })
-            .map_err(|e| PlatformError::Hotkey(format!("spawn press: {e}")))?;
+            .map_err(|e| HotkeyError::Hotkey(format!("spawn press: {e}")))?;
 
         thread::Builder::new()
             .name("oido-hotkey-release".into())
@@ -209,16 +197,17 @@ impl Hotkey for RdevHotkey {
                     on_release();
                 }
             })
-            .map_err(|e| PlatformError::Hotkey(format!("spawn release: {e}")))?;
+            .map_err(|e| HotkeyError::Hotkey(format!("spawn release: {e}")))?;
 
         self.listener = Some(listener);
         Ok(())
     }
 
-    fn unregister(&mut self) -> Result<(), PlatformError> {
+    fn unregister(&mut self) -> Result<(), HotkeyError> {
         self.running.store(false, Ordering::SeqCst);
-        // Evitamos llamar a post_win32_thread_quit y join para prevenir STATUS_ACCESS_VIOLATION
-        // debido a las limitaciones/condiciones de carrera de rdev con hooks globales en Windows.
+        // Evitamos hacer join para prevenir STATUS_ACCESS_VIOLATION
+        // debido a las limitaciones/condiciones de carrera de rdev con
+        // hooks globales en Windows.
         self.listener.take();
         self.active = None;
         Ok(())
@@ -237,7 +226,6 @@ fn run_rdev_grab(
     press_tx: crossbeam_channel::Sender<()>,
     release_tx: crossbeam_channel::Sender<()>,
     running: Arc<AtomicBool>,
-    tid_tx: crossbeam_channel::Sender<u32>,
 ) {
     use parking_lot::Mutex;
     use std::time::{Duration, Instant};
@@ -253,11 +241,6 @@ fn run_rdev_grab(
         last_modifier_at: Option<Instant>,
     }
     let state = Mutex::new(MatchState::default());
-
-    #[cfg(target_os = "windows")]
-    let _ = tid_tx.send(oido_stt::get_current_win32_thread_id());
-    #[cfg(not(target_os = "windows"))]
-    let _ = tid_tx.send(0);
 
     // Callback de `rdev::grab`: `None` suprime el evento antes de que
     // llegue a la app con foco; `Some(event)` lo deja pasar. Esto es
@@ -337,13 +320,13 @@ fn run_rdev_grab(
 /// que ya acepta el formato de Tauri. Aunque ya no usamos
 /// `global-hotkey` para registrar, reutilizamos su gramática para
 /// evitar reinventar una tabla de teclas que quedaría divergente.
-pub fn parse(binding: &str) -> Result<(Modifiers, Code), PlatformError> {
+pub fn parse(binding: &str) -> Result<(Modifiers, Code), HotkeyError> {
     let trimmed = binding.trim();
     if trimmed.is_empty() {
-        return Err(PlatformError::Hotkey("parse: binding vacío".into()));
+        return Err(HotkeyError::Hotkey("parse: binding vacío".into()));
     }
     let parsed = GHKey::try_from(trimmed)
-        .map_err(|e| PlatformError::Hotkey(format!("parse: {binding:?} → {e}")))?;
+        .map_err(|e| HotkeyError::Hotkey(format!("parse: {binding:?} → {e}")))?;
     Ok((parsed.mods, parsed.key))
 }
 

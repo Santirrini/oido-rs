@@ -6,7 +6,9 @@
 
 use crate::pipeline::{PipelineEvent, PipelineState};
 use crossbeam_channel::{Receiver, Sender};
-use oido_platform::{AudioRx, AudioTx, CaptureSource, Hotkey, Injector, Resampler};
+use oido_audio::{AudioRx, AudioTx, CaptureSource, Resampler};
+use oido_hotkey::Hotkey;
+use oido_input::Injector;
 use oido_stt::Streamer;
 use parking_lot::Mutex;
 use std::sync::Arc;

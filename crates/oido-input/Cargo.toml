@@ -1,0 +1,18 @@
+[package]
+name = "oido-input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Inyección de texto al SO (clipboard + paste simulado). 100% Safe Rust."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+arboard.workspace = true
+enigo.workspace = true

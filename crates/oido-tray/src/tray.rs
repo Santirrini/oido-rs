@@ -36,7 +36,7 @@ use parking_lot::Mutex;
 use tray_icon::menu::MenuId;
 
 use crate::icon;
-use crate::traits::{MenuAction, PlatformError, Tray, TrayState};
+use crate::traits::{MenuAction, Tray, TrayError, TrayState};
 
 use self::sections::{default_sections, id_to_action, BuildContext, MenuSection, Section};
 
@@ -61,7 +61,7 @@ impl PlatformTray {
         active_model: String,
         ui_language: oido_config::UiLanguage,
         prompt_preset: oido_config::PromptPreset,
-    ) -> Result<Self, PlatformError> {
+    ) -> Result<Self, TrayError> {
         let mut ctx = BuildContext::initial(models_dir, active_model);
         ctx.ui_language = ui_language;
         ctx.prompt_preset = prompt_preset;
@@ -72,7 +72,7 @@ impl PlatformTray {
     /// árbol visible es el descrito por las secciones; los items
     /// siguen el mismo mapeo `id → MenuAction` que el set por
     /// defecto.
-    pub fn with_sections(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
+    pub fn with_sections(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, TrayError> {
         Ok(Self(Inner::new(sections)?))
     }
 }
@@ -91,19 +91,19 @@ impl std::fmt::Debug for PlatformTray {
 }
 
 impl Tray for PlatformTray {
-    fn show(&mut self) -> Result<(), PlatformError> {
+    fn show(&mut self) -> Result<(), TrayError> {
         self.0.show()
     }
-    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), PlatformError> {
+    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), TrayError> {
         self.0.set_state(state, theme)
     }
-    fn hide(&mut self) -> Result<(), PlatformError> {
+    fn hide(&mut self) -> Result<(), TrayError> {
         self.0.hide()
     }
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
         self.0.take_menu_events()
     }
-    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), PlatformError> {
+    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), TrayError> {
         self.0.rebuild_menu(sections)
     }
 }
@@ -136,7 +136,7 @@ impl std::fmt::Debug for LinuxTray {
 
 #[cfg(target_os = "linux")]
 impl LinuxTray {
-    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
+    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, TrayError> {
         let (sender, receiver) = crossbeam_channel::bounded(16);
         tracing::info!(
             count = sections.len(),
@@ -154,17 +154,17 @@ impl LinuxTray {
 
 #[cfg(target_os = "linux")]
 impl Tray for LinuxTray {
-    fn show(&mut self) -> Result<(), PlatformError> {
+    fn show(&mut self) -> Result<(), TrayError> {
         tracing::info!("tray Linux (ksni): show");
         Ok(())
     }
-    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), PlatformError> {
+    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), TrayError> {
         self.current_state = state;
         self.current_theme = theme;
         tracing::info!(?state, "tray Linux state");
         Ok(())
     }
-    fn hide(&mut self) -> Result<(), PlatformError> {
+    fn hide(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
@@ -192,18 +192,18 @@ impl std::fmt::Debug for MacTray {
 
 #[cfg(target_os = "macos")]
 impl MacTray {
-    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
+    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, TrayError> {
         let (sender, receiver) = crossbeam_channel::bounded::<MenuAction>(16);
         let rgba = icon::render_state(TrayState::Idle, Theme::System);
         let tray_icon_img = tray_icon::Icon::from_rgba(rgba.data, rgba.width, rgba.height)
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         let (menu, id_map) = build_menu_from_sections(&sections);
         let icon = tray_icon::TrayIconBuilder::new()
             .with_icon(tray_icon_img)
             .with_tooltip("oido — idle")
             .with_menu(Box::new(menu))
             .build()
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
 
         spawn_event_forwarder(id_map, sender);
 
@@ -216,23 +216,23 @@ impl MacTray {
 
 #[cfg(target_os = "macos")]
 impl Tray for MacTray {
-    fn show(&mut self) -> Result<(), PlatformError> {
+    fn show(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
-    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), PlatformError> {
+    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), TrayError> {
         let rgba = icon::render_state(state, theme);
         let new_icon = tray_icon::Icon::from_rgba(rgba.data, rgba.width, rgba.height)
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         self.icon
             .set_icon(Some(new_icon))
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         let tooltip = state_tooltip(state);
         self.icon
             .set_tooltip(Some(tooltip))
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         Ok(())
     }
-    fn hide(&mut self) -> Result<(), PlatformError> {
+    fn hide(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
@@ -263,18 +263,18 @@ impl std::fmt::Debug for WindowsTray {
 
 #[cfg(target_os = "windows")]
 impl WindowsTray {
-    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, PlatformError> {
+    pub fn new(sections: Vec<Box<dyn MenuSection>>) -> Result<Self, TrayError> {
         let (sender, receiver) = crossbeam_channel::bounded::<MenuAction>(16);
         let rgba = icon::render_state(TrayState::Idle, Theme::System);
         let tray_icon_img = tray_icon::Icon::from_rgba(rgba.data, rgba.width, rgba.height)
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         let (menu, id_map) = build_menu_from_sections(&sections);
         let icon = tray_icon::TrayIconBuilder::new()
             .with_icon(tray_icon_img)
             .with_tooltip("oido — idle")
             .with_menu(Box::new(menu))
             .build()
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
 
         spawn_event_forwarder(Arc::clone(&id_map), sender);
 
@@ -288,29 +288,29 @@ impl WindowsTray {
 
 #[cfg(target_os = "windows")]
 impl Tray for WindowsTray {
-    fn show(&mut self) -> Result<(), PlatformError> {
+    fn show(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
-    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), PlatformError> {
+    fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), TrayError> {
         let rgba = icon::render_state(state, theme);
         let new_icon = tray_icon::Icon::from_rgba(rgba.data, rgba.width, rgba.height)
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         self.icon
             .set_icon(Some(new_icon))
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         let tooltip = state_tooltip(state);
         self.icon
             .set_tooltip(Some(tooltip))
-            .map_err(|e| PlatformError::Tray(e.to_string()))?;
+            .map_err(|e| TrayError::Tray(e.to_string()))?;
         Ok(())
     }
-    fn hide(&mut self) -> Result<(), PlatformError> {
+    fn hide(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
         self.receiver.take()
     }
-    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), PlatformError> {
+    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), TrayError> {
         let (menu, new_id_map) = build_menu_from_sections(&sections);
         // Sustituye el menú nativo adjunto al icono. En tray-icon 0.24
         // `set_menu` no retorna Result en Windows; en macOS sí. Manejamos
@@ -318,7 +318,7 @@ impl Tray for WindowsTray {
         #[cfg(target_os = "macos")]
         {
             if let Err(e) = self.icon.set_menu(Some(Box::new(menu))) {
-                return Err(PlatformError::Tray(format!("set_menu: {e}")));
+                return Err(TrayError::Tray(format!("set_menu: {e}")));
             }
         }
         #[cfg(not(target_os = "macos"))]

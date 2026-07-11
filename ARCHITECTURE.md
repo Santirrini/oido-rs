@@ -84,6 +84,12 @@ impl ConfigStore {
 
 ## Mapa de crates
 
+> **Refactor modular profundo (Fase 6):** el antiguo crate monolítico
+> `oido-platform` se dividió en 4 crates granulares por dominio
+> (audio, hotkey, input, tray). Cada uno tiene una sola razón de
+> cambio. `oido-updater` se extrajo como crate hermano. `oido-stt`
+> quedó puramente dedicado a STT (sin código de UI).
+
 ```
                        ┌────────────────────────────┐
                        │            bin             │
@@ -97,27 +103,66 @@ impl ConfigStore {
        │ pipeline + filter│                          │ ConfigStore +    │
        │ + state events   │                          │ atomic write     │
        └──────┬───────────┘                          └──────────────────┘
-              │          ┌───────────────────┐
-              ├─────────►│     oido-stt      │  (trait Transcriber)
-              │          │   WhisperCpp      │
-              │          └───────────────────┘
-              │          ┌───────────────────┐
-              └─────────►│  oido-platform    │  (traits OS + impls)
-                         │  win/mac/linux    │
-                         └───────────────────┘
+              │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+              ├─►│ oido-audio  │  │ oido-hotkey │  │ oido-input  │
+              │  │ 100% Safe   │  │ 100% Safe   │  │ 100% Safe   │
+              │  │  Capture +  │  │  Hotkey +   │  │  Injector   │
+              │  │ Resampler   │  │  GatedHotkey│  │ (arboard)   │
+              │  └─────────────┘  └─────────────┘  └─────────────┘
+              │  ┌─────────────────────────────────────────────┐
+              ├─►│              oido-stt                      │
+              │  │  WhisperCpp (FFI aislado, R2) + LocalAgre- │
+              │  │  ement streamer. Sin UI, sin hotkey, sin   │
+              │  │  tray.                                     │
+              │  └─────────────────────────────────────────────┘
+              │  ┌─────────────────────────────────────────────┐
+              └─►│              oido-tray                     │
+                 │  Único crate con `unsafe` fuera de oido-stt│
+                 │  (popup GDI Win32 + MessageBox + DPI).     │
+                 │  Bandeja + popup + icon + dialog + helpers │
+                 │  Win32 UI (`pump_windows_message_loop`,    │
+                 │  `set_windows_menu_theme`).                │
+                 └─────────────────────────────────────────────┘
+
+       ┌──────────────────┐         ┌──────────────────┐
+       │  oido-models     │         │  oido-updater    │
+       │  catálogo +      │         │  (hermano)       │
+       │  descarga HF     │         │  self_update +   │
+       └──────────────────┘         │  reqwest + sha2  │
+                                    └──────────────────┘
 ```
 
 Dependencias permitidas entre crates:
 
 ```
+oido-core          ──> oido-{audio, hotkey, input} (traits)
 oido-core          ──> oido-stt (trait)
-oido-core          ──> oido-platform (traits)
 oido-core          ──> oido-config (read config al boot)
-oido-stt           ──> (sólo stdlib + whisper-rs)
-oido-platform      ──> (sólo stdlib + crates OS por cfg)
+oido-stt           ──> (sólo stdlib + whisper-rs)        [post-Fase 6]
+oido-audio         ──> oido-config (types), cpal, rubato
+oido-hotkey        ──> oido-config (types), rdev, global-hotkey
+oido-input         ──> (arboard + enigo, sin deps internas)
+oido-tray          ──> oido-config, oido-models, muda, tray-icon, ksni, dark-light
 oido-config        ──> (sólo stdlib + serde + dirs + tempfile)
-bin                ──> oido-core (única dependencia directa)
+oido-models        ──> oido-config, reqwest, sha2, hex
+oido-updater       ──> (self_update, reqwest, sha2, hex, serde)
+bin (oido)         ──> oido-{core, config, models, audio, hotkey, input, tray, stt}
+                      oido-updater? (optional, gate feature `updater`)
 ```
+
+**Aislamiento de `unsafe` (R2):** tras el refactor, los únicos lugares
+del workspace con bloques `unsafe` son:
+
+1. `oido-stt/src/whisper_cpp.rs` — FFI whisper.cpp + helpers Win32.
+2. `oido-tray/src/dialog.rs` — `MessageBoxW` Win32.
+3. `oido-tray/src/dpi.rs` — `SetProcessDpiAwarenessContext` Win32.
+4. `oido-tray/src/tray/popup_window.rs` — ventana Win32 borderless + GDI.
+5. `oido-tray/src/win_helper.rs` — `PeekMessageW`/`DispatchMessageW`
+   y `SetPreferredAppMode` (loadlibrary + GetProcAddress por ordinal).
+
+Todos llevan `#![allow(unsafe_code)]` a nivel de archivo. `cargo
+geiger` debe confirmar este set; cualquier otro `unsafe` requiere
+justificación en este `ARCHITECTURE.md` + aprobación de review.
 
 No se permite dependencia cíclica. Si la piensas, refactoriza.
 

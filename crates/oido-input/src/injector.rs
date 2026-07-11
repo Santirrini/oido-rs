@@ -18,7 +18,7 @@ use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use parking_lot::Mutex;
 
-use crate::traits::{Injector, PlatformError};
+use crate::{InjectError, Injector};
 
 #[cfg(target_os = "macos")]
 const MODIFIER: Key = Key::Meta;
@@ -41,11 +41,11 @@ impl std::fmt::Debug for ArboardInjector {
 }
 
 impl ArboardInjector {
-    pub fn new() -> Result<Arc<Self>, PlatformError> {
+    pub fn new() -> Result<Arc<Self>, InjectError> {
         let clipboard =
-            Clipboard::new().map_err(|e| PlatformError::Inject(format!("clipboard: {e}")))?;
+            Clipboard::new().map_err(|e| InjectError::Inject(format!("clipboard: {e}")))?;
         let enigo = Enigo::new(&Settings::default())
-            .map_err(|e| PlatformError::Inject(format!("enigo: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("enigo: {e}")))?;
         Ok(Arc::new(Self {
             inner: Arc::new(Mutex::new(Inner { clipboard, enigo })),
         }))
@@ -53,12 +53,12 @@ impl ArboardInjector {
 }
 
 impl Injector for ArboardInjector {
-    fn inject(&self, text: &str) -> Result<(), PlatformError> {
+    fn inject(&self, text: &str) -> Result<(), InjectError> {
         let mut inner = self.inner.lock();
         inner
             .clipboard
             .set_text(text.to_owned())
-            .map_err(|e| PlatformError::Inject(format!("clipboard set: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("clipboard set: {e}")))?;
 
         // Pequeño respiro para que la ventana destino procese el cambio
         // antes de mandar la pulsación; en Win especialmente ahorra
@@ -75,31 +75,31 @@ impl Injector for ArboardInjector {
         inner
             .enigo
             .key(MODIFIER, Direction::Press)
-            .map_err(|e| PlatformError::Inject(format!("enigo mod press: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("enigo mod press: {e}")))?;
         inner
             .enigo
             .key(Key::Unicode('v'), Direction::Press)
-            .map_err(|e| PlatformError::Inject(format!("enigo V press: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("enigo V press: {e}")))?;
         inner
             .enigo
             .key(Key::Unicode('v'), Direction::Release)
-            .map_err(|e| PlatformError::Inject(format!("enigo V release: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("enigo V release: {e}")))?;
         inner
             .enigo
             .key(MODIFIER, Direction::Release)
-            .map_err(|e| PlatformError::Inject(format!("enigo mod release: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("enigo mod release: {e}")))?;
         // Re-press el modificador a "ninguna" semántica: el SO ya está
         // esperando. Si la app destino ignoró V por estado de foco,
         // Fase 1 no lo reintenta (YAGNI retry).
         Ok(())
     }
 
-    fn type_text(&self, text: &str) -> Result<(), PlatformError> {
+    fn type_text(&self, text: &str) -> Result<(), InjectError> {
         let mut inner = self.inner.lock();
         inner
             .enigo
             .text(text)
-            .map_err(|e| PlatformError::Inject(format!("enigo text: {e}")))?;
+            .map_err(|e| InjectError::Inject(format!("enigo text: {e}")))?;
         Ok(())
     }
 }
