@@ -440,7 +440,14 @@ mod tests {
     #[test]
     fn parse_accepts_tauri_aliases() {
         let (mods, _) = parse("CommandOrControl+Alt+F12").expect("alias parsea");
-        assert!(mods.contains(Modifiers::CONTROL));
+        // `CommandOrControl` se mapea a CONTROL en Win/Linux y a META
+        // (Cmd) en macOS — sigue la semántica de Tauri, no la de
+        // Electron. El test assertúa la unión para que sea portable
+        // entre los 3 OSes soportados.
+        assert!(
+            mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::META),
+            "CommandOrControl debe resolver a CONTROL o META, got mods={mods:?}"
+        );
         assert!(mods.contains(Modifiers::ALT));
     }
 
