@@ -27,18 +27,28 @@ pub mod popup;
 pub mod popup_window;
 pub mod sections;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use oido_config::Theme;
-use parking_lot::Mutex;
-use tray_icon::menu::MenuId;
 
-use crate::icon;
 use crate::traits::{MenuAction, Tray, TrayError, TrayState};
 
-use self::sections::{default_sections, id_to_action, BuildContext, MenuSection, Section};
+use self::sections::{default_sections, BuildContext, MenuSection};
+
+// Imports usados sólo en la rama Windows/macOS (id_map + tray-icon API).
+// cfg-gated para que el bin compile limpio en Linux sin -D warnings.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use self::sections::{id_to_action, Section};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use crate::icon;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use parking_lot::Mutex;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use std::collections::HashMap;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use std::sync::Arc;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use tray_icon::menu::MenuId;
 
 // ---------------------------------------------------------------------------
 // PlatformTray — wrapper que selecciona la impl según el OS en compilación
@@ -114,6 +124,11 @@ impl Tray for PlatformTray {
 
 #[cfg(target_os = "linux")]
 pub struct LinuxTray {
+    /// Reservado para una futura impl D-Bus/ksni que sí emita
+    /// MenuAction de su lado (hoy el forwarder está en WindowsTray
+    /// y MacTray). Marcado allow(dead_code) para no contaminar el
+    /// CI con -D warnings hasta que la impl se materialice.
+    #[allow(dead_code)]
     sender: crossbeam_channel::Sender<MenuAction>,
     receiver: Option<crossbeam_channel::Receiver<MenuAction>>,
     current_state: TrayState,

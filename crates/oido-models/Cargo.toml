@@ -9,7 +9,7 @@ authors.workspace = true
 description = "Catálogo y descarga de modelos whisper.cpp + VAD desde HuggingFace."
 
 [dependencies]
-oido-config = { path = "../oido-config" }
+oido-config = { path = "../oido-config", version = "0.1.0" }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

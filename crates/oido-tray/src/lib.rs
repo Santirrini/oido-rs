@@ -24,6 +24,7 @@ pub mod traits;
 pub mod tray;
 pub mod win_helper;
 
+#[cfg(target_os = "windows")]
 pub use dialog::show_model_prompt_windows;
 pub use traits::{MenuAction, Tray, TrayError, TrayState};
 pub use tray::sections::{default_sections, BuildContext, MenuSection};

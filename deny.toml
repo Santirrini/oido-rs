@@ -87,6 +87,12 @@ allow = [
     "GPL-2.0",
     "GPL-3.0",
     "OFL-1.1",
+    # CDLA-Permissive-2.0: viene transitivo de webpki-root-certs (1.0.8) →
+    # rustls-platform-verifier → reqwest 0.13. Es una lista de roots
+    # de Mozilla cubierta por el acuerdo de datos comunitarios. No es
+    # código que se linke estáticamente; se consume en runtime al
+    # validar cadenas TLS.
+    "CDLA-Permissive-2.0",
 ]
 
 confidence-threshold = 0.5
