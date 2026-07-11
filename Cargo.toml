@@ -3,7 +3,11 @@ resolver = "2"
 members = [
     "crates/oido-core",
     "crates/oido-stt",
-    "crates/oido-platform",
+    "crates/oido-audio",
+    "crates/oido-hotkey",
+    "crates/oido-input",
+    "crates/oido-tray",
+    "crates/oido-updater",
     "crates/oido-config",
     "crates/oido-models",
     "crates/oido",
@@ -39,10 +43,14 @@ proptest = "1"
 ctrlc = "3"
 
 # HTTP client para descarga de modelos desde HuggingFace.
-# `default-features = false` evita OpenSSL/Schannel nativo; `rustls-tls` es
+# `default-features = false` evita OpenSSL/Schannel nativo; `rustls` es
 # puro Rust. `blocking` permite descargar desde un thread dedicado sin
 # levantar un runtime async.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
+# Pinned a 0.13 para alinear con `self_update 0.44` (su misma versión
+# mayor). Mantener reqwest a una sola mayor en el workspace evita
+# duplicar todo el stack HTTP/TLS (hyper, rustls, tokio-rustls, etc.)
+# en `Cargo.lock`. NB: en 0.13 la feature `rustls-tls` se renombró a `rustls`.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "blocking"] }
 # SHA-256 para verificar integridad de los `.bin` descargados.
 sha2 = "0.10"
 # Encoding hex para serializar el digest de SHA256.
@@ -108,3 +116,24 @@ strip = "symbols"
 
 [profile.dev]
 opt-level = 0
+
+# -------------------------------------------------------------------
+# Security override: bump transitiva de quick-xml a >= 0.41
+#
+# `self_update 0.44` arrastra `quick-xml 0.38.4` como dependencia
+# transitiva. La 0.38.4 tiene RUSTSEC-2026-0194/0195 (OOM DoS en
+# `NamespaceResolver::push` al parsear tags con muchas declaraciones
+# de namespace). El fix upstream está en `quick-xml >= 0.41.0`, pero
+# `self_update` aún no subió su requisito mínimo.
+#
+# La mitigación es no usar NsReader (el código afectado), sólo el
+# `Reader` plano. self_update 0.44 parsea GitHub Releases con
+# `serde_json`, no con `quick-xml` (verificado en github.rs), por lo
+# que **no estamos expuestos** en la práctica. Aún así, mantenemos
+# el dep en 0.41+ via `cargo update -p quick-xml --precise 0.41.0`
+# (ver Cargo.lock) y dejamos esta nota para no reintroducir la 0.38
+# al regenerar el lock manualmente.
+#
+# Cuando `self_update > 0.44` suba su requisito, se puede borrar
+# esta nota.
+# -------------------------------------------------------------------

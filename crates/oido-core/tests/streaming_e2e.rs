@@ -11,8 +11,10 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
+use oido_audio::{AudioError, AudioFrame, CaptureSource};
 use oido_core::{PipelineEvent, PipelineState, StreamingPipeline, StreamingPipelineConfig};
-use oido_platform::{AudioFrame, CaptureSource, Hotkey, Injector, PlatformError};
+use oido_hotkey::{Hotkey, HotkeyError};
+use oido_input::{InjectError, Injector};
 use oido_stt::{PartialTranscript, Streamer, SttError};
 
 // ----- Mock capture ---------------------------------------------------------
@@ -58,14 +60,14 @@ impl MockCaptureHandle {
 }
 
 impl CaptureSource for MockCapture {
-    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), PlatformError> {
+    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), AudioError> {
         *self.inner.sink.lock() = Some(sink);
         Ok(())
     }
-    fn start(&mut self) -> Result<(), PlatformError> {
+    fn start(&mut self) -> Result<(), AudioError> {
         Ok(())
     }
-    fn stop(&mut self) -> Result<(), PlatformError> {
+    fn stop(&mut self) -> Result<(), AudioError> {
         *self.inner.sink.lock() = None;
         Ok(())
     }
@@ -138,12 +140,12 @@ impl Hotkey for MockHotkey {
         _binding: &str,
         on_press: Box<dyn Fn() + Send + 'static>,
         on_release: Box<dyn Fn() + Send + 'static>,
-    ) -> Result<(), PlatformError> {
+    ) -> Result<(), HotkeyError> {
         *self.inner.on_press.lock() = Some(on_press);
         *self.inner.on_release.lock() = Some(on_release);
         Ok(())
     }
-    fn unregister(&mut self) -> Result<(), PlatformError> {
+    fn unregister(&mut self) -> Result<(), HotkeyError> {
         *self.inner.on_press.lock() = None;
         *self.inner.on_release.lock() = None;
         Ok(())
@@ -186,11 +188,11 @@ impl MockInjectorHandle {
 }
 
 impl Injector for MockInjector {
-    fn inject(&self, text: &str) -> Result<(), PlatformError> {
+    fn inject(&self, text: &str) -> Result<(), InjectError> {
         self.inner.texts.lock().push(text.to_owned());
         Ok(())
     }
-    fn type_text(&self, text: &str) -> Result<(), PlatformError> {
+    fn type_text(&self, text: &str) -> Result<(), InjectError> {
         self.inner.texts.lock().push(text.to_owned());
         Ok(())
     }

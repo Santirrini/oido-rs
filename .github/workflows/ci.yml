@@ -85,3 +85,19 @@ jobs:
         run: cargo install cargo-deny --locked
       - name: deny check
         run: cargo deny check
+
+  machete:
+    # Detecta dependencias declaradas en Cargo.toml que no se usan en
+    # el código. Atrapa el patrón "dep copiada del crate viejo y nunca
+    # removida" que ya tuvimos en oido-audio/oido-hotkey/oido-input.
+    name: cargo-machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+      - name: machete check
+        # `cargo-machete` opera sobre el workspace por defecto (no
+        # acepta el flag `--workspace` en 0.9.x).
+        run: cargo machete

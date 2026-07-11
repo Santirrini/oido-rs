@@ -18,7 +18,7 @@
 //!   acceso a teclas globales está bloqueado por el protocolo (es un
 //!   problema del SO, no de este crate).
 //! - Windows: `rdev::listen` usa `RegisterRawInputDevices`; algunas
-//!   sesiones RDP lo bloquean. Si falla devolvemos `PlatformError`.
+//!   sesiones RDP lo bloquean. Si falla devolvemos `HotkeyError`.
 
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ use crossbeam_channel::{bounded, select, tick};
 use global_hotkey::hotkey::{Code, Modifiers};
 use rdev::{Event, EventType, Key};
 
-use crate::traits::PlatformError;
+use crate::HotkeyError;
 
 /// Timeout total del grab. Pasado ese tiempo sin pulsación útil,
 /// devolvemos error en vez de colgar el bin.
@@ -38,11 +38,11 @@ const MODIFIER_WINDOW: Duration = Duration::from_millis(500);
 
 /// Captura la siguiente tecla pulsada por el usuario a nivel global y
 /// devuelve `(modificadores, tecla)` listos para pasarse a
-/// `oido_platform::hotkey::register` o serializarse con
-/// `oido_platform::hotkey::serialize`.
+/// `oido_hotkey::hotkey::register` o serializarse con
+/// `oido_hotkey::hotkey::serialize`.
 ///
-/// `Escape` cancela el grab y devuelve `PlatformError::Hotkey(...)`.
-pub fn grab_next_key() -> Result<(Modifiers, Code), PlatformError> {
+/// `Escape` cancela el grab y devuelve `HotkeyError::Hotkey(...)`.
+pub fn grab_next_key() -> Result<(Modifiers, Code), HotkeyError> {
     let (tx, rx) = bounded::<(Modifiers, Code)>(1);
 
     // El hilo de `rdev::listen` se apropia de `tx`. Si termina
@@ -50,7 +50,7 @@ pub fn grab_next_key() -> Result<(Modifiers, Code), PlatformError> {
     std::thread::Builder::new()
         .name("oido-key-grab".into())
         .spawn(move || run_listener(tx))
-        .map_err(|e| PlatformError::Hotkey(format!("grab: spawn thread: {e}")))?;
+        .map_err(|e| HotkeyError::Hotkey(format!("grab: spawn thread: {e}")))?;
 
     // Timeout duro para no colgar el bin si nadie pulsa nada.
     let ticker = tick(GRAB_TIMEOUT);
@@ -58,9 +58,9 @@ pub fn grab_next_key() -> Result<(Modifiers, Code), PlatformError> {
     select! {
         recv(rx) -> msg => match msg {
             Ok(pair) => Ok(pair),
-            Err(_) => Err(PlatformError::Hotkey("grab: listener terminó sin resultado".into())),
+            Err(_) => Err(HotkeyError::Hotkey("grab: listener terminó sin resultado".into())),
         },
-        recv(ticker) -> _ => Err(PlatformError::Hotkey(format!(
+        recv(ticker) -> _ => Err(HotkeyError::Hotkey(format!(
             "grab: timeout {GRAB_TIMEOUT:?} sin pulsación"
         ))),
     }

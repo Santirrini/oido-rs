@@ -1,0 +1,18 @@
+[package]
+name = "oido-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Captura y resampling de audio PCM (cpal + rubato). 100% Safe Rust."
+
+[lints]
+workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+cpal.workspace = true
+rubato.workspace = true

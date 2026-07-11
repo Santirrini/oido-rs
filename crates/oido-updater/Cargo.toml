@@ -1,0 +1,25 @@
+[package]
+name = "oido-updater"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Auto-updater MSI del bin `oido` (self_update + reqwest + SHA256 verify)."
+
+[lints]
+workspace = true
+
+[features]
+default = ["updater"]
+# La crate sólo contiene código de update cuando esta feature está
+# activa. Mantiene al bin `oido` ligero en builds sin updater.
+updater = ["dep:self_update", "dep:reqwest", "dep:sha2", "dep:hex", "dep:serde"]
+
+[dependencies]
+anyhow.workspace = true
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls"], optional = true }
+reqwest = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }

@@ -45,7 +45,9 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use oido_platform::{AudioRx, AudioTx, CaptureSource, Hotkey, Injector, Resampler};
+use oido_audio::{AudioRx, AudioTx, CaptureSource, Resampler};
+use oido_hotkey::Hotkey;
+use oido_input::Injector;
 use oido_stt::Transcriber;
 
 use crate::dedup::Dedup;
@@ -92,6 +94,13 @@ type SttJob = Vec<f32>;
 /// riesgo de OOM y soportar ráfagas de 3+ activaciones consecutivas
 /// mientras los 2 workers procesan los buffers previos.
 const STT_QUEUE_CAP: usize = 6;
+
+/// Número de workers STT que `Pipeline::start` arranca en paralelo.
+/// Se expone como `pub` para que el bin `oido` pueda derivar el
+/// número de threads por worker (`Config::n_threads / STT_WORKERS`)
+/// sin duplicar el literal "2" (que se desincroniza silenciosamente
+/// si cambia aquí).
+pub const STT_WORKERS: u16 = 2;
 
 #[derive(Debug)]
 pub struct Pipeline {
@@ -202,8 +211,7 @@ impl Pipeline {
 
         // 3) STT workers: drena stt_rx → transcribe → filter → inject.
         //    Posee su propio clon de event_tx, transcriber, injector.
-        const STT_WORKERS: usize = 2;
-        for i in 0..STT_WORKERS {
+        for i in 0..STT_WORKERS as usize {
             let stt_rx = self.stt_rx.clone();
             let event_tx = self.event_tx.clone();
             let transcriber = Arc::clone(&self.cfg.transcriber);

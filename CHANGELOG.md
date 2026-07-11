@@ -1,5 +1,51 @@
 # Changelog
 
+## Fase 6 - Refactor Modular Profundo
+
+**Fecha:** 2026-07-11
+
+### Crate dividido: `oido-platform` → 4 crates granulares
+- `oido-audio` (NUEVO) — captura + resampling. 100% Safe Rust. Tests: 7/7.
+- `oido-hotkey` (NUEVO) — hotkeys globales + `GatedHotkey` + `key_grab`. 100% Safe Rust. Tests: 13/13.
+- `oido-input` (NUEVO) — inyección de texto (clipboard + paste). 100% Safe Rust.
+- `oido-tray` (NUEVO) — bandeja, popup GDI custom, icono, diálogos, DPI awareness, helpers Win32 UI. Único crate con `unsafe` permitido fuera de `oido-stt`. Tests: 32/32.
+
+### Crate hermano extraído: `oido-updater` (NUEVO)
+- Aísla `self_update` + `reqwest` + `sha2` + `hex` + `serde` del bin `oido`.
+- El feature flag `updater` ahora activa este crate opcional en vez de deps sueltas en el bin.
+- Reduce la superficie de compilación del bin en builds sin updater.
+
+### Limpieza de código muerto en `oido-stt`
+- Eliminadas 4 funciones Win32 que vivían en `oido-stt/src/whisper_cpp.rs`:
+  `pump_windows_message_loop`, `set_windows_menu_theme`, `get_current_win32_thread_id`,
+  `post_win32_thread_quit`. Las 2 primeras se mudaron a `oido-tray/src/win_helper.rs` (UI
+  pura, no STT). Las 2 últimas eran código muerto total (0 call sites).
+- Eliminadas dependencias huérfanas en `oido-stt`: `oido-config`, `dark-light`,
+  `windows-sys`. El único uso de `oido-config` en `oido-stt` era
+  `set_windows_menu_theme(theme)` que ya no vive aquí.
+
+### Bin `oido` partido en módulos
+- `main.rs` (1516 LOC) ahora es punto de entrada delgado (~50 LOC de imports/mod
+  + `fn main()`). Lógica extraída a:
+  - `cli.rs` — `struct Cli` (clap)
+  - `control.rs` — `enum ControlMessage`
+  - `models_setup.rs` — paths, VAD, prompts
+  - `model_lifecycle.rs` — click handlers + descarga lazy
+  - `diagnostics.rs` — `run_check` + tabla Unicode
+  - `runtime.rs` — `enum ActivePipeline`
+  - `hotkey_setup.rs` — sub-comando `--set-hotkey`
+
+### Cumplimiento de reglas
+- **R1** mantenido: `crossbeam::channel` entre stages. Cero `Arc<Mutex<T>>` nuevos.
+- **R2** reforzado: `unsafe` aislado en `oido-stt/src/whisper_cpp.rs` + archivos
+  marcados `#![allow(unsafe_code)]` en `oido-tray` (dialog, dpi, tray/popup_window,
+  win_helper). Los 3 crates nuevos (audio/hotkey/input) son 100% Safe Rust.
+- **R3** mantenido: `parking_lot::Mutex` exclusivo en `oido-config::ConfigStore`.
+
+### Test suite
+- 52 tests pasan en workspace (audio 7 + hotkey 13 + tray 32 = 52, más los tests
+  preexistentes en core/config/models que también siguen pasando).
+
 ## Fase 5a - MSI Installer & Auto-Updater
 
 **Fecha:** 2026-07-11

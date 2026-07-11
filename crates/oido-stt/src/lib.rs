@@ -10,11 +10,6 @@ pub mod streaming;
 pub mod whisper_cpp;
 
 pub use streaming::{LocalAgreementStreamer, PartialTranscript, Streamer};
-#[cfg(target_os = "windows")]
-pub use whisper_cpp::{
-    get_current_win32_thread_id, post_win32_thread_quit, pump_windows_message_loop,
-    set_windows_menu_theme,
-};
 pub use whisper_cpp::{GpuConfig, WhisperCpp};
 
 use std::fmt::Debug;

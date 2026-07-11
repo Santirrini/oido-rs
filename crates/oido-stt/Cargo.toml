@@ -19,20 +19,11 @@ vulkan = ["whisper-rs/vulkan"]
 audio-smoke = []
 
 [dependencies]
-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-oido-config = { path = "../oido-config", version = "0.1.0" }
-dark-light.workspace = true
 parking_lot.workspace = true
 
 # Fase 1: whisper-rs enlaza y compila whisper.cpp estáticamente. Build
 # pesa bastante (cmake + toolchain C++); ver CI install steps.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 whisper-rs.workspace = true
-
-[target.'cfg(target_os = "windows")'.dependencies]
-# `Win32_UI_Controls` (SetWindowTheme) ya no se usa aquí: vivía en
-# el hook CBT eliminado. Migró a `oido-platform::tray::popup_window`
-# donde el nuevo popup GDI custom pinta todo manualmente.
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Threading"] }

@@ -1,0 +1,41 @@
+[package]
+name = "oido-tray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Menú nativo de bandeja, popup GDI custom, iconos, diálogos Win32 y helpers UI. Único crate con `unsafe` permitido fuera de `oido-stt`."
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[dependencies]
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+oido-config = { path = "../oido-config", version = "0.1.0" }
+oido-models = { path = "../oido-models", version = "0.1.0" }
+dark-light.workspace = true
+tray-icon = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

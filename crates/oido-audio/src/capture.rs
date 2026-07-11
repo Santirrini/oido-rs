@@ -10,9 +10,6 @@
 //!   [`oido-core`] consumer thread aplica resampler → 16 kHz
 //! ```
 //!
-//! El resampler vive en `oido-core` (donde sí podemos mantener estado
-//! entre frames). `CpalCapture` se limita a entregar lo que el OS da.
-//!
 //! Esto soluciona el bug de Fase 1 donde si el dispositivo no soportaba
 //! 16 kHz nativo, whisper.cpp recibía audio al sample rate incorrecto
 //! y producía basura.
@@ -22,8 +19,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::Sender;
 use std::fmt;
 
-use crate::traits::{CaptureSource, PlatformError};
-use crate::AudioFrame;
+use crate::{AudioError, AudioFrame, CaptureSource};
 
 pub struct CpalCapture {
     device: cpal::Device,
@@ -46,11 +42,11 @@ impl std::fmt::Debug for CpalCapture {
 }
 
 impl CpalCapture {
-    pub fn new() -> Result<Self, PlatformError> {
+    pub fn new() -> Result<Self, AudioError> {
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or_else(|| {
-            PlatformError::Capture("sin dispositivo de entrada por defecto".into())
-        })?;
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| AudioError::Capture("sin dispositivo de entrada por defecto".into()))?;
 
         // Preferimos 16 kHz mono F32 (lo que necesita whisper.cpp). Si
         // no está disponible, caemos al default del dispositivo; el
@@ -73,7 +69,7 @@ impl CpalCapture {
             None => {
                 let fallback = device
                     .default_input_config()
-                    .map_err(|e| PlatformError::Capture(format!("default_input_config: {e}")))?;
+                    .map_err(|e| AudioError::Capture(format!("default_input_config: {e}")))?;
                 tracing::warn!(
                     requested = 16_000,
                     actual = fallback.sample_rate(),
@@ -98,16 +94,16 @@ impl CpalCapture {
 }
 
 impl CaptureSource for CpalCapture {
-    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), PlatformError> {
+    fn open(&mut self, sink: Sender<AudioFrame>) -> Result<(), AudioError> {
         self.sink = Some(sink);
         Ok(())
     }
 
-    fn start(&mut self) -> Result<(), PlatformError> {
+    fn start(&mut self) -> Result<(), AudioError> {
         let sink = self
             .sink
             .clone()
-            .ok_or_else(|| PlatformError::Capture("open() no invocado antes de start()".into()))?;
+            .ok_or_else(|| AudioError::Capture("open() no invocado antes de start()".into()))?;
         let sample_rate = self.sample_rate;
         let channels = self.stream_config.channels as usize;
 
@@ -183,24 +179,24 @@ impl CaptureSource for CpalCapture {
                 None,
             ),
             other => {
-                return Err(PlatformError::Capture(format!(
+                return Err(AudioError::Capture(format!(
                     "sample format no soportado: {other:?}"
                 )));
             }
         }
-        .map_err(|e| PlatformError::Capture(format!("build_input_stream: {e}")))?;
+        .map_err(|e| AudioError::Capture(format!("build_input_stream: {e}")))?;
 
         stream
             .play()
-            .map_err(|e| PlatformError::Capture(format!("stream.play: {e}")))?;
+            .map_err(|e| AudioError::Capture(format!("stream.play: {e}")))?;
         self.stream = Some(stream);
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), PlatformError> {
+    fn stop(&mut self) -> Result<(), AudioError> {
         if let Some(s) = self.stream.take() {
             s.pause()
-                .map_err(|e| PlatformError::Capture(format!("pause: {e}")))?;
+                .map_err(|e| AudioError::Capture(format!("pause: {e}")))?;
         }
         Ok(())
     }
@@ -312,7 +308,7 @@ impl Resampler {
     /// menos un chunk completo disponible. Sustituye al `truncate` de
     /// Fase 1 que silenciosamente descartaba audio cuando cpal
     /// entregaba frames grandes (p.ej. 4096 muestras @ 48 kHz).
-    pub fn process(&mut self, input: &[f32]) -> Result<Vec<f32>, PlatformError> {
+    pub fn process(&mut self, input: &[f32]) -> Result<Vec<f32>, AudioError> {
         use rubato::Resampler;
         if input.is_empty() {
             return Ok(Vec::new());
@@ -339,7 +335,7 @@ impl Resampler {
             let result = self
                 .inner
                 .process(&waves_in, None)
-                .map_err(|e| PlatformError::Capture(format!("resampler.process: {e}")))?;
+                .map_err(|e| AudioError::Capture(format!("resampler.process: {e}")))?;
             out.extend(result.into_iter().flatten());
         }
         // Lo que quede en `self.pending` (< chunk_in) se difiere para
