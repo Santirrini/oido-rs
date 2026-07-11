@@ -553,7 +553,10 @@ fn main() -> Result<()> {
                     tracing::info!("La aplicación ya está actualizada.");
                 }
                 Ok(updater::Status::DownloadedAndInstalling { version }) => {
-                    tracing::info!("Nueva versión v{} descargada. Iniciando instalador...", version);
+                    tracing::info!(
+                        "Nueva versión v{} descargada. Iniciando instalador...",
+                        version
+                    );
                 }
                 Err(e) => {
                     tracing::error!("Error al buscar o aplicar actualización: {:?}", e);
@@ -1079,7 +1082,8 @@ fn main() -> Result<()> {
                 let dir = models_dir.clone();
                 let shared_for_dl = shared_transcriber.as_ref().map(Arc::clone);
                 let cfg_for_dl = Arc::clone(&cfg);
-                let span = tracing::info_span!("download_model_startup", filename = "ggml-base.bin");
+                let span =
+                    tracing::info_span!("download_model_startup", filename = "ggml-base.bin");
                 let _ = thread::Builder::new()
                     .name("oido-downloader".into())
                     .spawn(move || {
