@@ -24,8 +24,11 @@ Remove-Item env:RUSTFLAGS -ErrorAction SilentlyContinue
 # 3. Copy executable to staging
 Copy-Item -Path "target/release/oido.exe" -Destination "installer/staging/oido.exe" -Force
 
-# 4. Extract version
-$version = (Get-Content "Cargo.toml" | Select-String '^\s*version\s*=\s*"(.*)"' | ForEach-Object { $_.Matches.Groups[1].Value } | Select-Object -First 1)
+# 4. Extract version and validate
+$version = (Get-Content "Cargo.toml" | Select-String '^\s*version\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches.Groups[1].Value } | Select-Object -First 1).Trim()
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "Failed to extract version from Cargo.toml"
+}
 Write-Host "Version extracted: $version"
 
 # 5. Compile WiX installer
