@@ -48,6 +48,7 @@ pub type TextTx = Sender<String>;
 pub type TextRx = Receiver<String>;
 
 pub mod capture;
+pub mod dialog;
 pub mod dpi;
 pub mod gate;
 pub mod hotkey;
@@ -58,6 +59,7 @@ pub mod traits;
 pub mod tray;
 
 pub use capture::Resampler;
+pub use dialog::show_model_prompt_windows;
 pub use gate::{GatedHotkey, GatedReadyHandle};
 pub use hotkey::RdevHotkey;
 pub use oido_config::Theme;

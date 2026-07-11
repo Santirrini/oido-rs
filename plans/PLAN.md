@@ -1,6 +1,6 @@
 # PLAN.md — Oido 2.0
 
-> Estado: Fase 0 no iniciada. Este documento es la fuente de verdad del proyecto.
+> Estado: Fase 5a (Auto-updater & MSI Installer para Windows) completada.
 
 ## Visión
 
@@ -302,17 +302,18 @@ Tareas:
 
 ---
 
-### Fase 5 — Auto-update + signing (3-5 días)
+### Fase 5 — Auto-update + signing (Completada para Windows MSI)
 
-**Objetivo:** `tauri-plugin-updater` apuntando GitHub Releases. Firma verificada.
+**Objetivo:** Auto-updater con verificación de firma y empaquetador MSI completado.
 
 Tareas:
-- `tauri.conf.json` updater config (endpoint GitHub Releases).
-- Win: `signtool` con cert (EV o OV).
-- macOS: Apple notarization + Developer ID signing (entitlements).
-- Linux: AppImage + `.deb` + SHA256 checksum en release.
-- CI: build artifacts + firma automática en tag push (`vX.Y.Z`).
-- Updater plugin: verificación clave pública embebida.
+- [x] Configuración de updater con endpoint de GitHub Releases
+- [x] Generación y verificación de llaves criptográficas (Ed25519) embebidas
+- [x] WiX installer para Windows (`oido.wxs`) generando MSI per-user
+- [x] Script de empaquetado y firmado (`build-msi.ps1`) con checksum SHA256
+- [x] CI/CD release workflow con compilación estática (`+crt-static`), smoke tests de instalación silenciosa, y publicación automática
+- [ ] macOS notarization + Developer ID signing (Fase posterior)
+- [ ] Linux AppImage + deb packaging (Fase posterior)
 
 **DoD:**
 - Tag `vX.Y.Z` → CI construye + firma → user recibe notificación → update

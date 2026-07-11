@@ -27,3 +27,14 @@ ui/.svelte-kit/
 
 # Toolchain cache
 .cargo/
+!.cargo/config.toml
+
+# Updater private key (never commit)
+installer/updater-privkey.pem
+
+# WiX Installer builds
+installer/staging/
+installer/dist/
+*.msi
+*.wixobj
+*.wixpdb

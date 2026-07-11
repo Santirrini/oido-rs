@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Oido" Language="1033" Version="$(var.Version)" Manufacturer="Oido Team" UpgradeCode="B9A8A529-65A0-449D-BBF9-2A835D8B41D8">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perUser" InstallPrivileges="limited" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="Oido" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="OidoExecutable" Guid="84C3F01E-9C3E-4B07-A532-D1AA0A6FF6CE" KeyPath="yes">
+        <File Id="OidoExe" Source="staging\oido.exe" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="ApplicationShortcut" Guid="761A4EBA-C3A5-42AF-B3BE-8D4C06A911BD">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="Oido"
+                  Description="Local-first voice dictation"
+                  Target="[INSTALLFOLDER]oido.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\Oido" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="ProductFeature" Title="Oido" Level="1">
+      <ComponentRef Id="OidoExecutable" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_Minimal" />
+  </Product>
+</Wix>
