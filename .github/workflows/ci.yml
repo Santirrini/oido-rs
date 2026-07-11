@@ -98,4 +98,6 @@ jobs:
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
       - name: machete check
-        run: cargo machete --workspace
+        # `cargo-machete` opera sobre el workspace por defecto (no
+        # acepta el flag `--workspace` en 0.9.x).
+        run: cargo machete

@@ -23,6 +23,32 @@ ignore = [
     "RUSTSEC-2024-0419", # gtk3-macros
     "RUSTSEC-2024-0420", # gtk-sys
     "RUSTSEC-2024-0370", # proc-macro-error
+    # ----------------------------------------------------------------
+    # quick-xml 0.38.4 (transitivo de self_update 0.44):
+    #
+    #   RUSTSEC-2025-0052 (unmaintained) — crate sin mantenimiento.
+    #   RUSTSEC-2026-0194 (duplicate attribute check OOM) — bypass del
+    #     check de atributos duplicados permite DoS por OOM.
+    #   RUSTSEC-2026-0195 (NamespaceResolver OOM) — un tag start con
+    #     N declaraciones de namespace dispara ~3N bytes de heap en
+    #     NamespaceResolver antes de que el consumer lo vea.
+    #
+    # El fix upstream está en quick-xml >= 0.41.0, pero self_update
+    # 0.44 requiere quick-xml = "^0.38" en su Cargo.toml, así que no
+    # podemos subir la transitiva sin un cambio de versión mayor en
+    # self_update (1.0-rc.x, aún inestable).
+    #
+    # **No estamos expuestos**: self_update 0.44 parsea GitHub
+    # Releases con `serde_json` (verificado en su github.rs backend),
+    # NO con quick-xml. Las 3 advisories afectan únicamente a usuarios
+    # de `quick_xml::NsReader` / `Reader` con namespace resolution,
+    # APIs que no ejercitamos. Reevaluar si en el futuro algún crate
+    # del workspace empieza a usar quick-xml para parsear XML
+    # untrusted.
+    # ----------------------------------------------------------------
+    "RUSTSEC-2025-0052",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 

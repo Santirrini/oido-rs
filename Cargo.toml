@@ -116,3 +116,24 @@ strip = "symbols"
 
 [profile.dev]
 opt-level = 0
+
+# -------------------------------------------------------------------
+# Security override: bump transitiva de quick-xml a >= 0.41
+#
+# `self_update 0.44` arrastra `quick-xml 0.38.4` como dependencia
+# transitiva. La 0.38.4 tiene RUSTSEC-2026-0194/0195 (OOM DoS en
+# `NamespaceResolver::push` al parsear tags con muchas declaraciones
+# de namespace). El fix upstream está en `quick-xml >= 0.41.0`, pero
+# `self_update` aún no subió su requisito mínimo.
+#
+# La mitigación es no usar NsReader (el código afectado), sólo el
+# `Reader` plano. self_update 0.44 parsea GitHub Releases con
+# `serde_json`, no con `quick-xml` (verificado en github.rs), por lo
+# que **no estamos expuestos** en la práctica. Aún así, mantenemos
+# el dep en 0.41+ via `cargo update -p quick-xml --precise 0.41.0`
+# (ver Cargo.lock) y dejamos esta nota para no reintroducir la 0.38
+# al regenerar el lock manualmente.
+#
+# Cuando `self_update > 0.44` suba su requisito, se puede borrar
+# esta nota.
+# -------------------------------------------------------------------

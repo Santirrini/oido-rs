@@ -181,6 +181,10 @@ pub struct MacTray {
     #[allow(dead_code)]
     icon: tray_icon::TrayIcon,
     receiver: Option<crossbeam_channel::Receiver<MenuAction>>,
+    /// Compartido con el forwarder de eventos. Se reemplaza atómicamente
+    /// en cada `rebuild_menu` para que los nuevos items del menú sean
+    /// visibles inmediatamente (mismo patrón que `WindowsTray`).
+    id_map: SharedIdMap,
 }
 
 #[cfg(target_os = "macos")]
@@ -205,11 +209,17 @@ impl MacTray {
             .build()
             .map_err(|e| TrayError::Tray(e.to_string()))?;
 
+        // El forwarder se queda con su clon; guardamos el nuestro para
+        // poder rotarlo en `rebuild_menu`. Si no lo retuviéramos, el
+        // primer rebuild dejaría al forwarder leyendo un mapa viejo
+        // (y los items reconstruidos emitirían MenuAction desconocidas).
+        let id_map_for_self = Arc::clone(&id_map);
         spawn_event_forwarder(id_map, sender);
 
         Ok(Self {
             icon,
             receiver: Some(receiver),
+            id_map: id_map_for_self,
         })
     }
 }
@@ -237,6 +247,25 @@ impl Tray for MacTray {
     }
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
         self.receiver.take()
+    }
+    fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), TrayError> {
+        let (menu, new_id_map) = build_menu_from_sections(&sections);
+        // En tray-icon 0.24, `set_menu` retorna `Result` solo en macOS;
+        // en Windows no. Como aquí estamos en la rama macOS, propagamos
+        // el error tal cual. (Windows tiene su propia rama cfg dentro de
+        // su impl homólogo para absorber la diferencia.)
+        if let Err(e) = self.icon.set_menu(Some(Box::new(menu))) {
+            return Err(TrayError::Tray(format!("set_menu: {e}")));
+        }
+        // Reemplaza el id_map atómicamente; el forwarder leerá la
+        // versión nueva a partir del próximo evento.
+        let replacement = Arc::try_unwrap(new_id_map)
+            .map(|m| m.into_inner())
+            .unwrap_or_else(|arc| MenuIdMap {
+                id_to_spec_id: arc.lock().id_to_spec_id.clone(),
+            });
+        *self.id_map.lock() = replacement;
+        Ok(())
     }
 }
 
