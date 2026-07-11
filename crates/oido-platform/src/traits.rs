@@ -9,7 +9,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use thiserror::Error;
 
-use oido_config::Theme;
+use oido_config::{PromptPreset, Theme, UiLanguage};
 
 use crate::tray::sections::MenuSection;
 use crate::AudioFrame;
@@ -86,6 +86,14 @@ pub enum MenuAction {
     ChangeHotkey,
     SetTheme(Theme),
     SetSttMode(oido_config::SttMode),
+    /// Click sobre uno de los items del submenú "Idioma de la
+    /// interfaz". Provoca un rebuild_menu con los strings del nuevo
+    /// idioma.
+    SetUiLanguage(UiLanguage),
+    /// Click sobre uno de los items del submenú "Prompt del sistema".
+    /// El bin decide qué texto concreto se inyecta a whisper.cpp
+    /// (preset vs. custom).
+    SetPromptPreset(PromptPreset),
     OpenModelsDir,
     CheckUpdates,
     TogglePause,

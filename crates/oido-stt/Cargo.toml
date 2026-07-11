@@ -32,4 +32,7 @@ parking_lot.workspace = true
 whisper-rs.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# `Win32_UI_Controls` (SetWindowTheme) ya no se usa aquí: vivía en
+# el hook CBT eliminado. Migró a `oido-platform::tray::popup_window`
+# donde el nuevo popup GDI custom pinta todo manualmente.
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Threading"] }

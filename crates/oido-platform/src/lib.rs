@@ -48,6 +48,7 @@ pub type TextTx = Sender<String>;
 pub type TextRx = Receiver<String>;
 
 pub mod capture;
+pub mod dpi;
 pub mod gate;
 pub mod hotkey;
 pub mod icon;
@@ -62,3 +63,10 @@ pub use hotkey::RdevHotkey;
 pub use oido_config::Theme;
 pub use traits::{CaptureSource, Hotkey, Injector, MenuAction, PlatformError, Tray, TrayState};
 pub use tray::PlatformTray;
+
+/// Habilita DPI awareness por monitor v2 antes de crear ventanas.
+/// Llamar al inicio de `main`. Safe de invocar múltiples veces (la
+/// API subyacente es idempotente a nivel de proceso).
+pub fn enable_dpi_awareness() {
+    dpi::enable_per_monitor_dpi_v2();
+}

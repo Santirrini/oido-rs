@@ -5,8 +5,24 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Re-declaramos los lints del workspace explícitamente porque
+# necesitamos abrir `unsafe_code` solo en este crate (para `dpi.rs` y
+# `tray/popup_window.rs`, ambos con `#![allow(unsafe_code)]`). El resto
+# del crate sigue siendo 100% safe Rust; CI detecta `unsafe` fuera de
+# esos dos archivos por el `#![allow]` explícito.
+# Lints locales. NO usamos `workspace = true` aquí porque el
+# workspace define `unsafe_code = "deny"` en su [lints] y necesitamos
+# relajarlo a "allow" en este crate (FFI Win32 vive en `dpi.rs` y
+# `tray/popup_window.rs`, ambos archivos están marcados explícitamente
+# con `#![allow(unsafe_code)]` para que sea trivial auditar qué archivos
+# contienen unsafe). Re-declaramos TODOS los lints heredados para
+# evitar el error de Cargo "cannot override workspace.lints".
 [lints]
-workspace = true
+rust.unsafe_code = "allow"
+rust.missing_debug_implementations = "warn"
+clippy.module_name_repetitions = "allow"
+clippy.must_use_candidate = "allow"
+
 
 [dependencies]
 serde.workspace = true
@@ -38,6 +54,21 @@ rubato.workspace = true
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon.workspace = true
 muda.workspace = true
+
+# Win32 FFI (DPI awareness + popup GDI). Gated a Windows para no tirar
+# deps adicionales en macOS/Linux. Las features cubren todo lo que
+# `dpi.rs` y `tray/popup_window.rs` usan en runtime.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni.workspace = true

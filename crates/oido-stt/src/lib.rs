@@ -6,16 +6,16 @@
 //! - `Send + Sync` para poder cruzar threads de captura y de inyección.
 //! - Sin estado mutable compartido con otras etapas del pipeline.
 
-pub mod whisper_cpp;
 pub mod streaming;
+pub mod whisper_cpp;
 
+pub use streaming::{LocalAgreementStreamer, PartialTranscript, Streamer};
 #[cfg(target_os = "windows")]
 pub use whisper_cpp::{
     get_current_win32_thread_id, post_win32_thread_quit, pump_windows_message_loop,
     set_windows_menu_theme,
 };
 pub use whisper_cpp::{GpuConfig, WhisperCpp};
-pub use streaming::{LocalAgreementStreamer, PartialTranscript, Streamer};
 
 use std::fmt::Debug;
 use std::path::Path;
@@ -98,6 +98,19 @@ impl SharedTranscriber {
     #[must_use]
     pub fn handle(&self) -> Arc<Mutex<WhisperCpp>> {
         Arc::clone(&self.inner)
+    }
+
+    /// Cambia el idioma de transcripción en runtime. No recarga el
+    /// modelo: solo actualiza el campo que `build_base_params` lee en
+    /// cada llamada. Toma el lock brevemente (nanosegundos).
+    pub fn set_language(&self, language: impl Into<String>) {
+        self.inner.lock().set_language(language);
+    }
+
+    /// Cambia el system prompt en runtime. String vacío desactiva el
+    /// prompt. Mismo contrato que `WhisperCpp::set_initial_prompt`.
+    pub fn set_initial_prompt(&self, prompt: impl Into<String>) {
+        self.inner.lock().set_initial_prompt(prompt);
     }
 }
 

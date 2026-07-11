@@ -4,13 +4,13 @@
 //! Regla R3: Mutex acotado (sólo BufferState compartido), el estado del streamer (LA-2)
 //! es pertenencia exclusiva del thread worker STT.
 
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use parking_lot::Mutex;
+use crate::pipeline::{PipelineEvent, PipelineState};
 use crossbeam_channel::{Receiver, Sender};
 use oido_platform::{AudioRx, AudioTx, CaptureSource, Hotkey, Injector, Resampler};
 use oido_stt::Streamer;
-use crate::pipeline::{PipelineEvent, PipelineState};
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 /// Configuración para arrancar el pipeline de streaming.
 #[derive(Debug)]
@@ -142,7 +142,10 @@ impl StreamingPipeline {
 
         // 2) Worker thread: Ejecuta inferencia periódica usando LocalAgreement-2.
         // Mueve la propiedad exclusiva del streamer al thread para no usar lock.
-        let mut streamer = self.streamer.take().expect("streamer already moved or not loaded");
+        let mut streamer = self
+            .streamer
+            .take()
+            .expect("streamer already moved or not loaded");
         let start_rx = self.start_rx.clone();
         let release_rx = self.release_rx.clone();
         let recording_w = Arc::clone(&self.recording);

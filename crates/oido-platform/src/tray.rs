@@ -20,6 +20,11 @@
 //! antes). `PlatformTray::with_sections(...)` permite al bin pasar
 //! un set personalizado.
 
+pub mod i18n;
+#[cfg(target_os = "windows")]
+pub mod popup;
+#[cfg(target_os = "windows")]
+pub mod popup_window;
 pub mod sections;
 
 use std::collections::HashMap;
@@ -33,7 +38,7 @@ use tray_icon::menu::MenuId;
 use crate::icon;
 use crate::traits::{MenuAction, PlatformError, Tray, TrayState};
 
-use self::sections::{default_sections, id_to_action, MenuSection, Section};
+use self::sections::{default_sections, id_to_action, BuildContext, MenuSection, Section};
 
 // ---------------------------------------------------------------------------
 // PlatformTray — wrapper que selecciona la impl según el OS en compilación
@@ -47,11 +52,20 @@ pub struct PlatformTray(MacTray);
 pub struct PlatformTray(WindowsTray);
 
 impl PlatformTray {
-    pub fn new(models_dir: PathBuf, active_model: String) -> Result<Self, PlatformError> {
-        Ok(Self(Inner::new(default_sections(
-            models_dir,
-            active_model,
-        ))?))
+    /// Construye el tray con un set mínimo de defaults. El bin debe
+    /// llamar a `rebuild_menu` con un `BuildContext` completo tras el
+    /// startup, para que el árbol refleje el `Config` real (tema,
+    /// modo STT, prompt selection, etc.).
+    pub fn new(
+        models_dir: PathBuf,
+        active_model: String,
+        ui_language: oido_config::UiLanguage,
+        prompt_preset: oido_config::PromptPreset,
+    ) -> Result<Self, PlatformError> {
+        let mut ctx = BuildContext::initial(models_dir, active_model);
+        ctx.ui_language = ui_language;
+        ctx.prompt_preset = prompt_preset;
+        Ok(Self(Inner::new(default_sections(&ctx))?))
     }
 
     /// Construye el tray con un set de secciones declarativo. El
@@ -357,6 +371,11 @@ type SharedIdMap = Arc<Mutex<MenuIdMap>>;
 /// (título, separador, Cambiar hotkey, Tema, Modo, separador,
 /// Utilidades, separador, Salir) y rellena un `MenuIdMap` que el
 /// forwarder usa para traducir clics a `MenuAction`s.
+///
+/// Compilado para Windows + macOS: usamos el menú nativo de `tray-icon`
+/// mientras el popup GDI custom (en `popup_window.rs`) está en
+/// preparación. Cuando esté listo, será el backend principal en Windows
+/// y `build_native_menu_for_windows` quedará como fallback.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn build_menu_from_sections(
     sections: &[Box<dyn MenuSection>],
@@ -440,10 +459,7 @@ fn spawn_event_forwarder(id_map: SharedIdMap, sender: crossbeam_channel::Sender<
                 if let Some(action) = id_to_action(&spec_id) {
                     let _ = sender.send(action);
                 } else {
-                    tracing::warn!(
-                        spec_id,
-                        "MenuEvent con spec_id sin MenuAction mapeada"
-                    );
+                    tracing::warn!(spec_id, "MenuEvent con spec_id sin MenuAction mapeada");
                 }
             } else {
                 tracing::debug!(

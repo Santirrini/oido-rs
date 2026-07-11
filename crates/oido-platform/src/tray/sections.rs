@@ -1,33 +1,32 @@
 //! Trait `MenuSection` — abstracción declarativa sobre el menú nativo
-//! de bandeja. Cada sección del menú (hotkey, tema, modo, utilidades)
-//! implementa este trait y se registra en `PlatformTray::with_sections`.
+//! de bandeja. Cada sección del menú (hotkey, tema, modo, idioma,
+//! prompt, modelos, exit) implementa este trait y se registra en
+//! `PlatformTray::with_sections`.
 //!
-//! ## Por qué este trait
+//! ## i18n
 //!
-//! Antes: `tray.rs::build_menu` definía el árbol del menú en un solo
-//! bloque de ~80 líneas, y `spawn_event_forwarder` mantenía un map
-//! paralelo `MenuId → MenuAction`. Añadir un item requería tocar 3-4
-//! lugares distintos.
-//!
-//! Ahora: cada sección describe su contenido de forma agnóstica al
-//! backend (`MenuItemSpec`, sin `tray_icon::MenuId` directo). El
-//! backend (Windows / macOS) traduce esa descripción al árbol nativo
-//! en una sola pasada, y rellena automáticamente el
-//! `HashMap<MenuId, MenuAction>` para el forwarder.
+//! Las secciones NO almacenan strings propios. Cada una guarda el
+//! `UiLanguage` activo y, en `build()`, consulta
+//! [`crate::tray::i18n::strings`] para obtener el `&'static Strings`
+//! correspondiente. Esto evita duplicación, garantiza que cambiar
+//! `UiLanguage` se refleja en el próximo `rebuild_menu`, y mantiene
+//! el contrato de `MenuSection: 'static` (las secciones no tienen
+//! lifetimes).
 //!
 //! ## Compatibilidad
 //!
-//! El árbol visible para el usuario es idéntico al anterior. El enum
-//! `MenuAction` no se toca (regla del plan: no romper tests e2e).
-//! `PlatformTray::new()` sigue existiendo (construye las secciones
-//! por defecto). `PlatformTray::with_sections(s)` es la API nueva.
+//! El árbol visible para el usuario es esencialmente idéntico al
+//! anterior; las 2 secciones nuevas (Idioma, Prompt) se insertan
+//! antes de "Modelos" para mantener la agrupación de "preferencias
+//! del usuario" en la parte superior.
 
 use std::path::PathBuf;
 
-use oido_config::{SttMode, Theme};
-use oido_models::{human_size, Language, ModelEntry, ModelFamily};
+use oido_config::{PromptPreset, SttMode, Theme, UiLanguage};
+use oido_models::{ModelEntry, ModelFamily};
 
 use crate::traits::MenuAction;
+use crate::tray::i18n::{strings, Strings};
 
 /// ID canónico de un item, estable entre OS. Sirve como clave del
 /// `HashMap<MenuId, MenuAction>` que el forwarder necesita para mapear
@@ -75,221 +74,18 @@ pub trait MenuSection: Send + Sync + 'static {
     fn build(&self) -> Vec<Section>;
 }
 
-/// Sección "Cambiar hotkey". Item simple en el nivel raíz.
-#[derive(Debug)]
-pub struct HotkeySection;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-impl MenuSection for HotkeySection {
-    fn id(&self) -> &'static str {
-        "hotkey"
-    }
-
-    fn build(&self) -> Vec<Section> {
-        vec![Section::Item(MenuItemSpec {
-            id: "change_hotkey".into(),
-            label: "Cambiar hotkey…".into(),
-            enabled: true,
-        })]
-    }
-}
-
-/// Sección "Tema" — submenú con 3 opciones de tema.
-#[derive(Debug)]
-pub struct ThemeSection;
-
-impl MenuSection for ThemeSection {
-    fn id(&self) -> &'static str {
-        "theme"
-    }
-
-    fn build(&self) -> Vec<Section> {
-        vec![Section::Submenu {
-            label: "Tema".into(),
-            items: vec![
-                MenuItemSpec {
-                    id: "theme_dark".into(),
-                    label: "Dark".into(),
-                    enabled: true,
-                },
-                MenuItemSpec {
-                    id: "theme_light".into(),
-                    label: "Light".into(),
-                    enabled: true,
-                },
-                MenuItemSpec {
-                    id: "theme_system".into(),
-                    label: "Sistema".into(),
-                    enabled: true,
-                },
-            ],
-        }]
-    }
-}
-
-/// Sección "Modo de dictado" — submenú con Batch / Streaming.
-#[derive(Debug)]
-pub struct ModeSection;
-
-impl MenuSection for ModeSection {
-    fn id(&self) -> &'static str {
-        "mode"
-    }
-
-    fn build(&self) -> Vec<Section> {
-        vec![Section::Submenu {
-            label: "Modo de dictado".into(),
-            items: vec![
-                MenuItemSpec {
-                    id: "mode_batch".into(),
-                    label: "Batch (Hold-to-Talk)".into(),
-                    enabled: true,
-                },
-                MenuItemSpec {
-                    id: "mode_streaming".into(),
-                    label: "Streaming (En vivo)".into(),
-                    enabled: true,
-                },
-            ],
-        }]
-    }
-}
-
-/// Sección "Modelos" — submenú dinámico con cada entry del catálogo de
-/// `oido_models`. Cada item se marca con `✓` (instalado) o `↓ Descargar`
-/// (no instalado) según el contenido de `models_dir` al construir la
-/// sección. El item activo lleva el sufijo `← activo`.
-///
-/// Esta sección debe reconstruirse vía `Tray::rebuild_menu` después de
-/// cada descarga o cambio de modelo activo para refrescar las marcas.
-#[derive(Debug)]
-pub struct ModelsSection {
-    pub models_dir: PathBuf,
-    pub active_model: String,
-}
-
-impl ModelsSection {
-    pub fn new(models_dir: PathBuf, active_model: impl Into<String>) -> Self {
-        Self {
-            models_dir,
-            active_model: active_model.into(),
-        }
-    }
-
-    /// Renderiza un único item del submenú a partir de un entry del catálogo.
-    fn render_item(entry: &ModelEntry, installed: bool, active: bool) -> MenuItemSpec {
-        let state = if installed { "✓ " } else { "↓ Descargar " };
-        let mut label = format!("{}{} ({})", state, entry.filename, human_size(entry.size_bytes));
-        if active {
-            label.push_str("  ← activo");
-        }
-        MenuItemSpec {
-            id: item_id(&entry.filename),
-            label,
-            enabled: true,
-        }
-    }
-
-    /// Construye el submenú de una familia (Tiny / Base / Small / Vad).
-    #[allow(dead_code)]
-    fn family_submenu(
-        family: ModelFamily,
-        installed: &[String],
-        active_model: &str,
-    ) -> Section {
-        let family_label = match family {
-            ModelFamily::Tiny => "Tiny",
-            ModelFamily::Base => "Base",
-            ModelFamily::Small => "Small",
-            ModelFamily::Vad => "VAD",
-        };
-        let mut items: Vec<MenuItemSpec> = oido_models::catalog()
-            .iter()
-            .filter(|e| e.family == family)
-            .map(|entry| {
-                let installed = installed.iter().any(|f| f == &entry.filename);
-                let active = entry.filename == active_model;
-                Self::render_item(entry, installed, active)
-            })
-            .collect();
-        items.sort_by(|a, b| {
-            let a_is_en = a.label.contains(".en.bin");
-            let b_is_en = b.label.contains(".en.bin");
-            b_is_en.cmp(&a_is_en)
-        });
-        Section::Submenu {
-            label: family_label.to_string(),
-            items,
-        }
-    }
-}
-
-impl MenuSection for ModelsSection {
-    fn id(&self) -> &'static str {
-        "models"
-    }
-
-    fn build(&self) -> Vec<Section> {
-        // Escaneo de disco (tolerante a errores: si el dir no existe, lista vacía).
-        let installed =
-            oido_models::list_installed(&self.models_dir).unwrap_or_default();
-
-        // Submenú "Modelos" con 4 sub-submenús por familia.
-        let mut model_items: Vec<MenuItemSpec> = Vec::new();
-        // Renderizamos como Submenu recursivo de Submenu. Como
-        // `Section::Submenu` solo soporta items planos (no submenús
-        // anidados), hacemos un flatten: agrupamos por familia y emitimos
-        // un Submenu por familia dentro del Submenu principal, pero el
-        // tipo actual no lo permite.
-        //
-        // Solución: emitimos los items con el family como prefijo en el
-        // label, agrupados visualmente por separadores.
-        for family in [
-            ModelFamily::Tiny,
-            ModelFamily::Base,
-            ModelFamily::Small,
-            ModelFamily::Vad,
-        ] {
-            // Marca la familia como sub-encabezado usando un item
-            // deshabilitado con el nombre + un separador visual después
-            // (vía Section::Separator).
-            model_items.push(MenuItemSpec {
-                id: String::new(),
-                label: format!("── {} ──", family_label(family)),
-                enabled: false,
-            });
-            for entry in oido_models::catalog().iter().filter(|e| e.family == family) {
-                let installed = installed.iter().any(|f| f == &entry.filename);
-                let active = entry.filename == self.active_model;
-                model_items.push(Self::render_item(entry, installed, active));
-            }
-        }
-        let _ = (Language::En, Language::Multi); // silencio unused si cambia el catálogo
-
-        vec![
-            Section::Submenu {
-                label: "Modelos".to_string(),
-                items: model_items,
-            },
-            Section::Item(MenuItemSpec {
-                id: "open_models_dir".into(),
-                label: "Abrir carpeta de modelos…".into(),
-                enabled: true,
-            }),
-            Section::Item(MenuItemSpec {
-                id: "check_updates".into(),
-                label: "Buscar actualizaciones".into(),
-                enabled: true,
-            }),
-        ]
-    }
-}
-
-fn family_label(family: ModelFamily) -> &'static str {
-    match family {
-        ModelFamily::Tiny => "Tiny",
-        ModelFamily::Base => "Base",
-        ModelFamily::Small => "Small",
-        ModelFamily::Vad => "VAD",
+/// Marca ✓ o vacío según `active`. Replica el patrón visual previo
+/// pero aplicado a subsecciones (idioma, prompt). El espacio al
+/// principio mantiene la alineación con los items sin marca.
+fn check_or_blank(active: bool) -> &'static str {
+    if active {
+        "✓ "
+    } else {
+        "  "
     }
 }
 
@@ -300,42 +96,473 @@ pub fn item_id(filename: &str) -> ItemId {
     format!("model:{filename}")
 }
 
-/// Sección "Salir" — siempre la última; item simple.
+// ---------------------------------------------------------------------------
+// Secciones existentes — refactor a `UiLanguage` interno
+// ---------------------------------------------------------------------------
+
+/// Sección "Cambiar hotkey". Item simple en el nivel raíz.
 #[derive(Debug)]
-pub struct ExitSection;
+pub struct HotkeySection {
+    pub ui_language: UiLanguage,
+}
 
-impl MenuSection for ExitSection {
+impl MenuSection for HotkeySection {
     fn id(&self) -> &'static str {
-        "exit"
+        "hotkey"
     }
-
     fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
         vec![Section::Item(MenuItemSpec {
-            id: "exit".into(),
-            label: "Salir".into(),
+            id: "change_hotkey".into(),
+            label: s.change_hotkey.into(),
             enabled: true,
         })]
     }
 }
 
-/// Conjunto canónico de secciones. La sección "Modelos" es dinámica y
-/// recibe `models_dir` + `active_model` para renderizar el estado de
-/// cada modelo (instalado/no-instalado + activo).
+/// Sección "Tema" — submenú con 3 opciones de tema.
+#[derive(Debug)]
+pub struct ThemeSection {
+    pub ui_language: UiLanguage,
+    pub current: Theme,
+}
+
+impl MenuSection for ThemeSection {
+    fn id(&self) -> &'static str {
+        "theme"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        vec![Section::Submenu {
+            label: s.theme.into(),
+            items: vec![
+                MenuItemSpec {
+                    id: "theme_dark".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == Theme::Dark),
+                        s.theme_dark
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "theme_light".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == Theme::Light),
+                        s.theme_light
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "theme_system".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == Theme::System),
+                        s.theme_system
+                    ),
+                    enabled: true,
+                },
+            ],
+        }]
+    }
+}
+
+/// Sección "Modo de dictado" — submenú con Batch / Streaming.
+#[derive(Debug)]
+pub struct ModeSection {
+    pub ui_language: UiLanguage,
+    pub current: SttMode,
+}
+
+impl MenuSection for ModeSection {
+    fn id(&self) -> &'static str {
+        "mode"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        vec![Section::Submenu {
+            label: s.mode.into(),
+            items: vec![
+                MenuItemSpec {
+                    id: "mode_batch".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == SttMode::Batch),
+                        s.mode_batch
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "mode_streaming".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == SttMode::Streaming),
+                        s.mode_streaming
+                    ),
+                    enabled: true,
+                },
+            ],
+        }]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Secciones NUEVAS: Idioma de la UI + Prompt del sistema
+// ---------------------------------------------------------------------------
+
+/// Sección "Idioma de la interfaz" — submenú con ES / EN / Bilingüe.
+#[derive(Debug)]
+pub struct UiLanguageSection {
+    pub current: UiLanguage,
+}
+
+impl MenuSection for UiLanguageSection {
+    fn id(&self) -> &'static str {
+        "ui_language"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.current);
+        vec![Section::Submenu {
+            label: s.ui_language.into(),
+            items: vec![
+                MenuItemSpec {
+                    id: "ui_es".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == UiLanguage::Es),
+                        s.ui_es
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "ui_en".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == UiLanguage::En),
+                        s.ui_en
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "ui_bil".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == UiLanguage::Bilingual),
+                        s.ui_bilingual
+                    ),
+                    enabled: true,
+                },
+            ],
+        }]
+    }
+}
+
+/// Sección "Prompt del sistema" — submenú con 4 presets.
 ///
-/// El bin debe llamar a `Tray::rebuild_menu` después de cada descarga
-/// o cambio de modelo activo para refrescar las marcas.
-pub fn default_sections(
-    models_dir: PathBuf,
-    active_model: impl Into<String>,
-) -> Vec<Box<dyn MenuSection>> {
+/// El item `prompt_custom` no abre un sub-flujo de edición (no hay
+/// `TextInput` en el backend de bandeja); el usuario edita el texto
+/// crudo vía CLI `oido.exe --set-prompt "..."`. El label del item
+/// lleva un hint apuntando a esa vía.
+#[derive(Debug)]
+pub struct PromptSection {
+    pub ui_language: UiLanguage,
+    pub current: PromptPreset,
+    pub custom_text: String, // contenido actual del system_prompt (vacío si no hay)
+}
+
+impl MenuSection for PromptSection {
+    fn id(&self) -> &'static str {
+        "prompt"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        let custom_label = if self.custom_text.is_empty() {
+            format!(
+                "{}{}  {}",
+                check_or_blank(self.current == PromptPreset::Custom),
+                s.prompt_custom,
+                s.prompt_custom_hint
+            )
+        } else {
+            // Truncar preview a 40 chars para no hacer el item enorme.
+            let preview: String = self.custom_text.chars().take(40).collect();
+            let ellipsis = if self.custom_text.chars().count() > 40 {
+                "…"
+            } else {
+                ""
+            };
+            format!(
+                "{}{}  \"{}{}\"",
+                check_or_blank(self.current == PromptPreset::Custom),
+                s.prompt_custom,
+                preview,
+                ellipsis
+            )
+        };
+        vec![Section::Submenu {
+            label: s.system_prompt.into(),
+            items: vec![
+                MenuItemSpec {
+                    id: "prompt_bilingual".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == PromptPreset::BilingualEsEn),
+                        s.prompt_bilingual
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "prompt_es".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == PromptPreset::SpanishOnly),
+                        s.prompt_es
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "prompt_en".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == PromptPreset::EnglishOnly),
+                        s.prompt_en
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "prompt_custom".into(),
+                    label: custom_label,
+                    enabled: true,
+                },
+            ],
+        }]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sección "Modelos" — refactor para usar strings i18n
+// ---------------------------------------------------------------------------
+
+/// Sección "Modelos" — submenú dinámico con cada entry del catálogo de
+/// `oido_models`. Cada item se marca con `✓` (instalado) o `↓ Descargar`
+/// (no instalado) según el contenido de `models_dir` al construir la
+/// sección. El item activo lleva el sufijo `← activo`.
+///
+/// Modelos `.en` (solo inglés) llevan un sufijo `⚠ Solo inglés` para
+/// que el usuario sepa que NO entenderá español, sin ocultar la opción.
+#[derive(Debug)]
+pub struct ModelsSection {
+    pub models_dir: PathBuf,
+    pub active_model: String,
+    pub ui_language: UiLanguage,
+}
+
+impl ModelsSection {
+    pub fn new(
+        models_dir: PathBuf,
+        active_model: impl Into<String>,
+        ui_language: UiLanguage,
+    ) -> Self {
+        Self {
+            models_dir,
+            active_model: active_model.into(),
+            ui_language,
+        }
+    }
+
+    /// Renderiza un único item del submenú a partir de un entry del catálogo.
+    fn render_item(
+        &self,
+        s: &Strings,
+        entry: &ModelEntry,
+        installed: bool,
+        active: bool,
+    ) -> MenuItemSpec {
+        let state = if installed {
+            s.model_installed
+        } else {
+            s.model_download
+        };
+        // Para modelos .en (solo inglés) añadimos un sufijo de aviso
+        // visual. NO bloqueamos la activación — el usuario decide.
+        let is_en_only = entry.filename.ends_with(".en.bin");
+        let en_warning = if is_en_only { s.model_en_only } else { "" };
+        let mut label = format!(
+            "{}{} ({}){}",
+            state,
+            entry.filename,
+            oido_models::human_size(entry.size_bytes),
+            en_warning
+        );
+        if active {
+            label.push_str(s.model_active);
+        }
+        MenuItemSpec {
+            id: item_id(&entry.filename),
+            label,
+            enabled: true,
+        }
+    }
+}
+
+impl MenuSection for ModelsSection {
+    fn id(&self) -> &'static str {
+        "models"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        let installed = oido_models::list_installed(&self.models_dir).unwrap_or_default();
+        let mut model_items: Vec<MenuItemSpec> = Vec::new();
+        for family in [
+            ModelFamily::Tiny,
+            ModelFamily::Base,
+            ModelFamily::Small,
+            ModelFamily::Vad,
+        ] {
+            // Encabezado de familia (item deshabilitado para que actúe
+            // como separador visual).
+            let family_label: &'static str = match family {
+                ModelFamily::Tiny => s.model_tiny,
+                ModelFamily::Base => s.model_base,
+                ModelFamily::Small => s.model_small,
+                ModelFamily::Vad => s.model_vad,
+            };
+            model_items.push(MenuItemSpec {
+                id: String::new(),
+                label: format!("── {family_label} ──"),
+                enabled: false,
+            });
+            for entry in oido_models::catalog().iter().filter(|e| e.family == family) {
+                let installed = installed.iter().any(|f| f == &entry.filename);
+                let active = entry.filename == self.active_model;
+                model_items.push(self.render_item(s, entry, installed, active));
+            }
+        }
+        vec![
+            Section::Submenu {
+                label: s.models.into(),
+                items: model_items,
+            },
+            Section::Item(MenuItemSpec {
+                id: "open_models_dir".into(),
+                label: s.open_models_dir.into(),
+                enabled: true,
+            }),
+            Section::Item(MenuItemSpec {
+                id: "check_updates".into(),
+                label: s.check_updates.into(),
+                enabled: true,
+            }),
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sección "Salir"
+// ---------------------------------------------------------------------------
+
+/// Sección "Salir" — siempre la última; item simple.
+#[derive(Debug)]
+pub struct ExitSection {
+    pub ui_language: UiLanguage,
+}
+
+impl MenuSection for ExitSection {
+    fn id(&self) -> &'static str {
+        "exit"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        vec![Section::Item(MenuItemSpec {
+            id: "exit".into(),
+            label: s.exit.into(),
+            enabled: true,
+        })]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// default_sections — composición canónica
+// ---------------------------------------------------------------------------
+
+/// Contexto necesario para construir el árbol de menú. Se pasa por
+/// referencia a `default_sections` para evitar listas largas de
+/// parámetros y para que un futuro campo extra (p.ej. `prompt_preset`
+/// cuando se añada más state) no rompa la API.
+///
+/// Diseño: este struct es la **fuente única de verdad** sobre el
+/// estado que el menú refleja. El bin debe mantenerlo en sincronía
+/// con `Config` (cada `replace + save` debe ir seguido de un
+/// `rebuild_menu` con un `BuildContext` actualizado).
+#[derive(Debug, Clone)]
+pub struct BuildContext {
+    pub models_dir: PathBuf,
+    pub active_model: String,
+    pub ui_language: UiLanguage,
+    pub theme: Theme,
+    pub stt_mode: SttMode,
+    pub prompt_preset: PromptPreset,
+    pub prompt_custom_text: String,
+}
+
+impl BuildContext {
+    /// Constructor de conveniencia con defaults razonables para el
+    /// primer render (antes de tener `Config` materializada). El bin
+    /// debe reemplazarlo con un contexto real tras el startup.
+    #[must_use]
+    pub fn initial(models_dir: PathBuf, active_model: impl Into<String>) -> Self {
+        Self {
+            models_dir,
+            active_model: active_model.into(),
+            ui_language: UiLanguage::Es,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::BilingualEsEn,
+            prompt_custom_text: String::new(),
+        }
+    }
+}
+
+/// Conjunto canónico de secciones.
+///
+/// El bin llama a `Tray::rebuild_menu` después de cada descarga o
+/// cambio de preferencia para refrescar el árbol.
+pub fn default_sections(ctx: &BuildContext) -> Vec<Box<dyn MenuSection>> {
     vec![
-        Box::new(HotkeySection),
-        Box::new(ThemeSection),
-        Box::new(ModeSection),
-        Box::new(ModelsSection::new(models_dir, active_model)),
-        Box::new(ExitSection),
+        Box::new(HotkeySection {
+            ui_language: ctx.ui_language,
+        }),
+        Box::new(ThemeSection {
+            ui_language: ctx.ui_language,
+            current: ctx.theme,
+        }),
+        Box::new(ModeSection {
+            ui_language: ctx.ui_language,
+            current: ctx.stt_mode,
+        }),
+        Box::new(UiLanguageSection {
+            current: ctx.ui_language,
+        }),
+        Box::new(PromptSection {
+            ui_language: ctx.ui_language,
+            current: ctx.prompt_preset,
+            custom_text: ctx.prompt_custom_text.clone(),
+        }),
+        Box::new(ModelsSection::new(
+            ctx.models_dir.clone(),
+            ctx.active_model.clone(),
+            ctx.ui_language,
+        )),
+        Box::new(ExitSection {
+            ui_language: ctx.ui_language,
+        }),
     ]
 }
+
+// ---------------------------------------------------------------------------
+// id_to_action — mapeo canónico
+// ---------------------------------------------------------------------------
 
 /// Mapea el `id` canónico de un `MenuItemSpec` a la acción que debe
 /// disparar el menú. Centraliza la traducción para que el forwarder
@@ -348,15 +575,24 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
         "theme_system" => MenuAction::SetTheme(Theme::System),
         "mode_batch" => MenuAction::SetSttMode(SttMode::Batch),
         "mode_streaming" => MenuAction::SetSttMode(SttMode::Streaming),
+        "ui_es" => MenuAction::SetUiLanguage(UiLanguage::Es),
+        "ui_en" => MenuAction::SetUiLanguage(UiLanguage::En),
+        "ui_bil" => MenuAction::SetUiLanguage(UiLanguage::Bilingual),
+        "prompt_bilingual" => MenuAction::SetPromptPreset(PromptPreset::BilingualEsEn),
+        "prompt_es" => MenuAction::SetPromptPreset(PromptPreset::SpanishOnly),
+        "prompt_en" => MenuAction::SetPromptPreset(PromptPreset::EnglishOnly),
+        "prompt_custom" => MenuAction::SetPromptPreset(PromptPreset::Custom),
         "open_models_dir" => MenuAction::OpenModelsDir,
         "check_updates" => MenuAction::CheckUpdates,
         "exit" => MenuAction::Exit,
-        id if id.starts_with("model:") => {
-            MenuAction::ModelItem(id["model:".len()..].to_string())
-        }
+        id if id.starts_with("model:") => MenuAction::ModelItem(id["model:".len()..].to_string()),
         _ => return None,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -365,10 +601,22 @@ mod tests {
 
     #[test]
     fn id_to_action_covers_known_ids() {
-        assert_eq!(id_to_action("change_hotkey"), Some(MenuAction::ChangeHotkey));
-        assert_eq!(id_to_action("theme_dark"), Some(MenuAction::SetTheme(Theme::Dark)));
-        assert_eq!(id_to_action("theme_light"), Some(MenuAction::SetTheme(Theme::Light)));
-        assert_eq!(id_to_action("theme_system"), Some(MenuAction::SetTheme(Theme::System)));
+        assert_eq!(
+            id_to_action("change_hotkey"),
+            Some(MenuAction::ChangeHotkey)
+        );
+        assert_eq!(
+            id_to_action("theme_dark"),
+            Some(MenuAction::SetTheme(Theme::Dark))
+        );
+        assert_eq!(
+            id_to_action("theme_light"),
+            Some(MenuAction::SetTheme(Theme::Light))
+        );
+        assert_eq!(
+            id_to_action("theme_system"),
+            Some(MenuAction::SetTheme(Theme::System))
+        );
         assert_eq!(
             id_to_action("mode_batch"),
             Some(MenuAction::SetSttMode(SttMode::Batch))
@@ -377,8 +625,44 @@ mod tests {
             id_to_action("mode_streaming"),
             Some(MenuAction::SetSttMode(SttMode::Streaming))
         );
-        assert_eq!(id_to_action("open_models_dir"), Some(MenuAction::OpenModelsDir));
-        assert_eq!(id_to_action("check_updates"), Some(MenuAction::CheckUpdates));
+        // i18n
+        assert_eq!(
+            id_to_action("ui_es"),
+            Some(MenuAction::SetUiLanguage(UiLanguage::Es))
+        );
+        assert_eq!(
+            id_to_action("ui_en"),
+            Some(MenuAction::SetUiLanguage(UiLanguage::En))
+        );
+        assert_eq!(
+            id_to_action("ui_bil"),
+            Some(MenuAction::SetUiLanguage(UiLanguage::Bilingual))
+        );
+        // prompt
+        assert_eq!(
+            id_to_action("prompt_bilingual"),
+            Some(MenuAction::SetPromptPreset(PromptPreset::BilingualEsEn))
+        );
+        assert_eq!(
+            id_to_action("prompt_es"),
+            Some(MenuAction::SetPromptPreset(PromptPreset::SpanishOnly))
+        );
+        assert_eq!(
+            id_to_action("prompt_en"),
+            Some(MenuAction::SetPromptPreset(PromptPreset::EnglishOnly))
+        );
+        assert_eq!(
+            id_to_action("prompt_custom"),
+            Some(MenuAction::SetPromptPreset(PromptPreset::Custom))
+        );
+        assert_eq!(
+            id_to_action("open_models_dir"),
+            Some(MenuAction::OpenModelsDir)
+        );
+        assert_eq!(
+            id_to_action("check_updates"),
+            Some(MenuAction::CheckUpdates)
+        );
         assert_eq!(id_to_action("exit"), Some(MenuAction::Exit));
         assert_eq!(
             id_to_action("model:ggml-base.bin"),
@@ -395,33 +679,47 @@ mod tests {
     fn empty_models_dir() -> (TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_path_buf();
-        // Mantenemos el TempDir vivo en el retorno para que no se
-        // elimine antes de que el test termine.
         (dir, path)
+    }
+
+    fn call_default(dir: PathBuf) -> Vec<Box<dyn MenuSection>> {
+        let ctx = BuildContext {
+            models_dir: dir,
+            active_model: "ggml-base.bin".into(),
+            ui_language: UiLanguage::Es,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::BilingualEsEn,
+            prompt_custom_text: String::new(),
+        };
+        default_sections(&ctx)
     }
 
     #[test]
     fn default_sections_produces_expected_tree() {
-        let (_tmp, models_dir) = empty_models_dir();
-        let sections = default_sections(models_dir, "ggml-base.bin");
+        let (_tmp, dir) = empty_models_dir();
+        let sections = call_default(dir);
         assert_eq!(
             sections.len(),
-            5,
-            "5 secciones: hotkey, theme, mode, models, exit"
+            7,
+            "7 secciones: hotkey, theme, mode, ui_language, prompt, models, exit"
         );
         for s in &sections {
-            assert!(!s.build().is_empty(), "sección {} no debe estar vacía", s.id());
+            assert!(
+                !s.build().is_empty(),
+                "sección {} no debe estar vacía",
+                s.id()
+            );
         }
     }
 
     #[test]
     fn default_sections_models_submenu_marks_installed_and_active() {
-        let (_tmp, models_dir) = empty_models_dir();
-        // Simulamos dos modelos ya descargados.
-        std::fs::write(models_dir.join("ggml-tiny.bin"), b"x").unwrap();
-        std::fs::write(models_dir.join("ggml-base.bin"), b"x").unwrap();
+        let (_tmp, dir) = empty_models_dir();
+        std::fs::write(dir.join("ggml-tiny.bin"), b"x").unwrap();
+        std::fs::write(dir.join("ggml-base.bin"), b"x").unwrap();
 
-        let sections = default_sections(models_dir, "ggml-base.bin");
+        let sections = call_default(dir);
         let models_section = sections
             .iter()
             .find(|s| s.id() == "models")
@@ -431,46 +729,194 @@ mod tests {
         for sec in models_section.build() {
             match sec {
                 Section::Item(spec) => items.push(spec),
-                Section::Submenu { items: sub_items, .. } => items.extend(sub_items),
+                Section::Submenu {
+                    items: sub_items, ..
+                } => items.extend(sub_items),
                 Section::Separator => {}
             }
         }
-
-        // ggml-tiny.bin está descargado y debe tener ✓.
         let tiny = items
             .iter()
             .find(|i| i.id == "model:ggml-tiny.bin")
             .expect("debe existir item ggml-tiny.bin");
-        assert!(tiny.label.starts_with("✓ "), "tiny debe estar marcado como instalado: {}", tiny.label);
+        assert!(
+            tiny.label.starts_with("✓ "),
+            "tiny debe estar marcado como instalado: {}",
+            tiny.label
+        );
 
-        // ggml-small.bin NO está descargado y debe tener ↓ Descargar.
         let small = items
             .iter()
             .find(|i| i.id == "model:ggml-small.bin")
             .expect("debe existir item ggml-small.bin");
         assert!(
-            small.label.starts_with("↓ Descargar "),
+            small.label.starts_with("↓ Descargar ") || small.label.starts_with("↓ Download "),
             "small debe estar marcado como no instalado: {}",
             small.label
         );
 
-        // ggml-base.bin está descargado Y es el activo → debe llevar ← activo.
         let base = items
             .iter()
             .find(|i| i.id == "model:ggml-base.bin")
             .expect("debe existir item ggml-base.bin");
         assert!(base.label.starts_with("✓ "));
         assert!(
-            base.label.contains("← activo"),
+            base.label.contains("← activo") || base.label.contains("← active"),
             "base debe estar marcado como activo: {}",
             base.label
         );
     }
 
+    /// El ítem activo en UiLanguage lleva prefijo ✓ en la entry
+    /// correspondiente.
+    #[test]
+    fn default_sections_marks_active_ui_language() {
+        let (_tmp, dir) = empty_models_dir();
+        let ctx = BuildContext {
+            models_dir: dir,
+            active_model: "ggml-base.bin".into(),
+            ui_language: UiLanguage::Bilingual,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::BilingualEsEn,
+            prompt_custom_text: String::new(),
+        };
+        let sections = default_sections(&ctx);
+        let sec = sections
+            .iter()
+            .find(|s| s.id() == "ui_language")
+            .expect("debe existir ui_language");
+        let items: Vec<MenuItemSpec> = sec
+            .build()
+            .into_iter()
+            .flat_map(|s| match s {
+                Section::Item(i) => vec![i],
+                Section::Submenu { items, .. } => items,
+                _ => vec![],
+            })
+            .collect();
+        let bil = items.iter().find(|i| i.id == "ui_bil").unwrap();
+        assert!(
+            bil.label.starts_with("✓ "),
+            "bilingüe debe estar activo: {}",
+            bil.label
+        );
+        let es = items.iter().find(|i| i.id == "ui_es").unwrap();
+        assert!(
+            !es.label.starts_with("✓ "),
+            "es no debe estar activo: {}",
+            es.label
+        );
+    }
+
+    /// El item prompt_custom muestra un preview del texto cuando NO
+    /// está vacío.
+    #[test]
+    fn prompt_section_shows_custom_preview_when_set() {
+        let (_tmp, dir) = empty_models_dir();
+        let ctx = BuildContext {
+            models_dir: dir,
+            active_model: "ggml-base.bin".into(),
+            ui_language: UiLanguage::Es,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::Custom,
+            prompt_custom_text: "Dictaré kubernetes, gRPC y WASM".into(),
+        };
+        let sections = default_sections(&ctx);
+        let sec = sections.iter().find(|s| s.id() == "prompt").unwrap();
+        let items: Vec<MenuItemSpec> = sec
+            .build()
+            .into_iter()
+            .flat_map(|s| match s {
+                Section::Item(i) => vec![i],
+                Section::Submenu { items, .. } => items,
+                _ => vec![],
+            })
+            .collect();
+        let custom = items.iter().find(|i| i.id == "prompt_custom").unwrap();
+        assert!(
+            custom.label.contains("kubernetes"),
+            "preview debe incluir el texto: {}",
+            custom.label
+        );
+        assert!(
+            custom.label.starts_with("✓ "),
+            "custom activo: {}",
+            custom.label
+        );
+    }
+
+    /// Con ui_language=En, los labels de los submenús cambian.
+    #[test]
+    fn default_sections_with_ui_language_en_uses_english_labels() {
+        let (_tmp, dir) = empty_models_dir();
+        let ctx = BuildContext {
+            models_dir: dir,
+            active_model: "ggml-base.bin".into(),
+            ui_language: UiLanguage::En,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::BilingualEsEn,
+            prompt_custom_text: String::new(),
+        };
+        let sections = default_sections(&ctx);
+        let hotkey = sections.iter().find(|s| s.id() == "hotkey").unwrap();
+        let items: Vec<MenuItemSpec> = hotkey
+            .build()
+            .into_iter()
+            .filter_map(|s| match s {
+                Section::Item(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items[0].label, "Change hotkey…");
+
+        let theme = sections.iter().find(|s| s.id() == "theme").unwrap();
+        let items: Vec<MenuItemSpec> = theme
+            .build()
+            .into_iter()
+            .flat_map(|s| match s {
+                Section::Submenu { items, .. } => items,
+                _ => vec![],
+            })
+            .collect();
+        assert!(items.iter().any(|i| i.label.contains("Dark")));
+        assert!(items.iter().any(|i| i.label.contains("Light")));
+        assert!(items.iter().any(|i| i.label.contains("System")));
+    }
+
+    /// Modelos `.en` llevan el sufijo de aviso.
+    #[test]
+    fn models_section_marks_en_only_models() {
+        let (_tmp, dir) = empty_models_dir();
+        std::fs::write(dir.join("ggml-tiny.en.bin"), b"x").unwrap();
+        let sections = call_default(dir);
+        let sec = sections.iter().find(|s| s.id() == "models").unwrap();
+        let items: Vec<MenuItemSpec> = sec
+            .build()
+            .into_iter()
+            .flat_map(|s| match s {
+                Section::Item(i) => vec![i],
+                Section::Submenu { items, .. } => items,
+                _ => vec![],
+            })
+            .collect();
+        let en = items
+            .iter()
+            .find(|i| i.id == "model:ggml-tiny.en.bin")
+            .unwrap();
+        assert!(
+            en.label.contains("⚠") && en.label.contains("ingl") || en.label.contains("English"),
+            "modelo .en debe llevar aviso: {}",
+            en.label
+        );
+    }
+
     #[test]
     fn default_sections_cover_all_menu_actions() {
-        let (_tmp, models_dir) = empty_models_dir();
-        let sections = default_sections(models_dir, "ggml-base.bin");
+        let (_tmp, dir) = empty_models_dir();
+        let sections = call_default(dir);
         let mut all_ids: Vec<String> = Vec::new();
         for s in &sections {
             for item in s.build() {
@@ -494,6 +940,13 @@ mod tests {
             "theme_system",
             "mode_batch",
             "mode_streaming",
+            "ui_es",
+            "ui_en",
+            "ui_bil",
+            "prompt_bilingual",
+            "prompt_es",
+            "prompt_en",
+            "prompt_custom",
             "open_models_dir",
             "check_updates",
             "exit",

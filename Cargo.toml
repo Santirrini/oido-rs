@@ -83,8 +83,12 @@ rubato = "0.15"
 # Stage lock: every member inherits MSRV pinned via workspace.package above.
 
 [workspace.lints.rust]
-# Regla R2: FFI aislado. Solo `oido-stt` puede abrir unsafe_code en su
-# propio `Cargo.toml` con `[lints] unsafe_code = "allow"`.
+# Regla R2: FFI aislado. Solo `oido-stt` y `oido-platform` (este último
+# para DPI + popup GDI) declaran `unsafe_code = "allow"` en su propio
+# `[lints]`. Todo el código `unsafe` en esos crates vive dentro de
+# archivos marcados explícitamente con `#![allow(unsafe_code)]` para
+# que sea trivial auditar FFI con un grep. CI revisa que ningún otro
+# archivo tenga `unsafe` accidental.
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 

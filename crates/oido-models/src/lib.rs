@@ -75,7 +75,9 @@ pub fn catalog() -> &'static [ModelEntry] {
 
 /// Busca un entry por filename exacto (case-sensitive).
 pub fn find(filename: &str) -> Option<&'static ModelEntry> {
-    LazyLock::force(&CATALOG).iter().find(|e| e.filename == filename)
+    LazyLock::force(&CATALOG)
+        .iter()
+        .find(|e| e.filename == filename)
 }
 
 /// Lista los filenames del catálogo que están presentes en `models_dir`.
@@ -128,6 +130,11 @@ fn download_inner(
     progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<(), ModelError> {
     let mut response = reqwest::blocking::Client::builder()
+        // HuggingFace responde con 302 → CDN (us.aws.cdn.hf.co).
+        // Por defecto `reqwest::blocking` NO sigue redirects; hay que
+        // activarlo manualmente o el GET se queda en 302 sin contenido.
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .user_agent("oido/0.1 (https://github.com/Santirrini/oido-rs)")
         .build()
         .map_err(|e| ModelError::Download(format!("client build: {e}")))?
         .get(&entry.url)
@@ -189,84 +196,84 @@ fn download_inner(
 
 static CATALOG: LazyLock<Vec<ModelEntry>> = LazyLock::new(|| {
     vec![
-    ModelEntry {
-        filename: String::from("ggml-tiny.en.bin"),
-        size_bytes: 77_700_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
-            "/ggml-tiny.en.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Tiny,
-        language: Language::En,
-    },
-    ModelEntry {
-        filename: String::from("ggml-tiny.bin"),
-        size_bytes: 77_700_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
-            "/ggml-tiny.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Tiny,
-        language: Language::Multi,
-    },
-    ModelEntry {
-        filename: String::from("ggml-base.en.bin"),
-        size_bytes: 148_000_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
-            "/ggml-base.en.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Base,
-        language: Language::En,
-    },
-    ModelEntry {
-        filename: String::from("ggml-base.bin"),
-        size_bytes: 148_000_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
-            "/ggml-base.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Base,
-        language: Language::Multi,
-    },
-    ModelEntry {
-        filename: String::from("ggml-small.en.bin"),
-        size_bytes: 488_000_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
-            "/ggml-small.en.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Small,
-        language: Language::En,
-    },
-    ModelEntry {
-        filename: String::from("ggml-small.bin"),
-        size_bytes: 488_000_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
-            "/ggml-small.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Small,
-        language: Language::Multi,
-    },
-    ModelEntry {
-        filename: String::from("ggml-silero-v5.1.2.bin"),
-        size_bytes: 2_300_000,
-        url: String::from(concat!(
-            "https://huggingface.co/ggml-org/whisper-vad/resolve/main",
-            "/ggml-silero-v5.1.2.bin"
-        )),
-        sha256: String::new(),
-        family: ModelFamily::Vad,
-        language: Language::Multi,
-    },
-]
+        ModelEntry {
+            filename: String::from("ggml-tiny.en.bin"),
+            size_bytes: 77_700_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-tiny.en.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Tiny,
+            language: Language::En,
+        },
+        ModelEntry {
+            filename: String::from("ggml-tiny.bin"),
+            size_bytes: 77_700_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-tiny.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Tiny,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-base.en.bin"),
+            size_bytes: 148_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-base.en.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Base,
+            language: Language::En,
+        },
+        ModelEntry {
+            filename: String::from("ggml-base.bin"),
+            size_bytes: 148_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-base.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Base,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-small.en.bin"),
+            size_bytes: 488_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-small.en.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Small,
+            language: Language::En,
+        },
+        ModelEntry {
+            filename: String::from("ggml-small.bin"),
+            size_bytes: 488_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-small.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Small,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-silero-v5.1.2.bin"),
+            size_bytes: 885_098,
+            url: String::from(concat!(
+                "https://huggingface.co/ggml-org/whisper-vad/resolve/main",
+                "/ggml-silero-v5.1.2.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Vad,
+            language: Language::Multi,
+        },
+    ]
 });
 
 /// Helper: lee un archivo a memoria y devuelve su SHA256 en hex.
@@ -401,10 +408,14 @@ mod tests {
         };
 
         let calls = std::sync::atomic::AtomicU64::new(0);
-        download_model(dir.path(), &entry, Some(&|done, total| {
-            assert!(done <= total);
-            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }))
+        download_model(
+            dir.path(),
+            &entry,
+            Some(&|done, total| {
+                assert!(done <= total);
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }),
+        )
         .unwrap();
         mock.assert_hits(1);
         assert!(dir.path().join("ggml-base.bin").is_file());
@@ -415,5 +426,35 @@ mod tests {
 
         let err = download_model(dir.path(), &entry, None).unwrap_err();
         assert!(matches!(err, ModelError::AlreadyInstalled(_)));
+    }
+
+    /// Test de integración contra HuggingFace real. Descarga el modelo
+    /// VAD (~2 MB, el más chico del catálogo) para verificar que el
+    /// cliente sigue redirects 302 → CDN de HF.
+    ///
+    /// Marcado `#[ignore]` para que `cargo test` no dependa de la red.
+    /// Ejecutar manualmente con:
+    ///   cargo test -p oido-models download_from_huggingface -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn download_from_huggingface_vad() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+
+        let entry = find("ggml-silero-v5.1.2.bin").expect("VAD debe estar en catálogo");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(&entry.filename);
+
+        let result = download_model(dir.path(), entry, None);
+        assert!(result.is_ok(), "descarga falló: {result:?}");
+        assert!(dest.is_file(), "el archivo no se creó en {dest:?}");
+        let meta = std::fs::metadata(&dest).unwrap();
+        assert!(
+            meta.len() > 500_000,
+            "VAD debe pesar ~885 KB, pesó {}",
+            meta.len()
+        );
+        tracing::info!(bytes = meta.len(), "VAD descargado OK");
     }
 }

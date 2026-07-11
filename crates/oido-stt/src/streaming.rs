@@ -3,10 +3,10 @@
 //! Regla R2: Toda la superficie expuesta y lógica de este archivo es 100% safe Rust.
 //! El FFI inseguro se aísla mediante las llamadas seguras provistas por `whisper-rs`.
 
+use crate::SttError;
 use std::path::Path;
 use std::sync::Arc;
 use whisper_rs::{WhisperContext, WhisperContextParameters, WhisperState};
-use crate::SttError;
 
 /// Representa el resultado parcial de una transcripción por streaming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,6 +43,7 @@ pub struct LocalAgreementStreamer {
     /// Es `Option` para permitir `Clone` sin error (el state no es `Clone`).
     state: Option<WhisperState>,
     language: Option<String>,
+    system_prompt: Option<String>,
     gpu_config: crate::GpuConfig,
     n_threads: u16,
 
@@ -61,6 +62,7 @@ impl Clone for LocalAgreementStreamer {
             ctx: self.ctx.clone(),
             state: None,
             language: self.language.clone(),
+            system_prompt: self.system_prompt.clone(),
             gpu_config: self.gpu_config,
             n_threads: self.n_threads,
             prev_tokens: Vec::new(),
@@ -76,11 +78,36 @@ impl LocalAgreementStreamer {
             ctx: None,
             state: None,
             language,
+            system_prompt: None,
             gpu_config,
             n_threads,
             prev_tokens: Vec::new(),
             confirmed_count: 0,
         }
+    }
+
+    /// Configura el system prompt que se inyecta a whisper.cpp en cada
+    /// `process()`. Mismo contrato que `WhisperCpp::with_initial_prompt`.
+    #[must_use]
+    pub fn with_initial_prompt(mut self, prompt: &str) -> Self {
+        self.system_prompt = if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt.to_string())
+        };
+        self
+    }
+
+    /// Setter runtime del system prompt. Se aplica en el próximo
+    /// `process()`; no requiere recargar el modelo.
+    pub fn set_initial_prompt(&mut self, prompt: impl Into<String>) {
+        let p = prompt.into();
+        self.system_prompt = if p.is_empty() { None } else { Some(p) };
+    }
+
+    /// Setter runtime del idioma.
+    pub fn set_language(&mut self, language: impl Into<String>) {
+        self.language = Some(language.into());
     }
 
     /// Carga el modelo Whisper en memoria y crea el WhisperState persistente.
@@ -114,14 +141,24 @@ impl LocalAgreementStreamer {
     /// Precalienta el modelo realizando una pasada de inferencia sobre silencio.
     pub fn warm_up(&self) -> Result<(), SttError> {
         let ctx = self.ctx.as_ref().ok_or_else(|| {
-            SttError::ModelNotFound(std::path::PathBuf::from("<LocalAgreementStreamer: modelo no cargado>"))
+            SttError::ModelNotFound(std::path::PathBuf::from(
+                "<LocalAgreementStreamer: modelo no cargado>",
+            ))
         })?;
 
         // 30 segundos de silencio para inicializar
         let silence = vec![0.0_f32; 16_000 * 30];
-        let mut state = ctx.create_state().map_err(|e| SttError::Backend(format!("create_state: {e}")))?;
-        let params = crate::whisper_cpp::build_streaming_params(self.language.as_deref(), self.n_threads);
-        state.full(params, &silence).map_err(|e| SttError::Backend(format!("full: {e}")))?;
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| SttError::Backend(format!("create_state: {e}")))?;
+        let params = crate::whisper_cpp::build_streaming_params(
+            self.language.as_deref(),
+            self.system_prompt.as_deref(),
+            self.n_threads,
+        );
+        state
+            .full(params, &silence)
+            .map_err(|e| SttError::Backend(format!("full: {e}")))?;
 
         Ok(())
     }
@@ -138,7 +175,9 @@ impl LocalAgreementStreamer {
         }
 
         let ctx = self.ctx.as_ref().ok_or_else(|| {
-            SttError::ModelNotFound(std::path::PathBuf::from("<LocalAgreementStreamer: modelo no cargado>"))
+            SttError::ModelNotFound(std::path::PathBuf::from(
+                "<LocalAgreementStreamer: modelo no cargado>",
+            ))
         })?;
 
         // Bug 2: reutilizar el WhisperState persistente. En clones recién creados
@@ -151,14 +190,20 @@ impl LocalAgreementStreamer {
         }
         let state = self.state.as_mut().expect("state inicializado arriba");
 
-        let mut params = crate::whisper_cpp::build_streaming_params(self.language.as_deref(), self.n_threads);
+        let mut params = crate::whisper_cpp::build_streaming_params(
+            self.language.as_deref(),
+            self.system_prompt.as_deref(),
+            self.n_threads,
+        );
 
         // Ajustar dinámicamente la ventana del contexto de audio
         let audio_secs = audio.len() as f32 / 16_000.0;
         let ctx_frames = (((audio_secs + 2.0) * 50.0) as i32).clamp(100, 1500);
         params.set_audio_ctx(ctx_frames);
 
-        state.full(params, audio).map_err(|e| SttError::Backend(format!("full: {e}")))?;
+        state
+            .full(params, audio)
+            .map_err(|e| SttError::Backend(format!("full: {e}")))?;
 
         // Bug 1: filtrar tokens especiales. Los tokens de texto real son [0, eot_id).
         // Todo token >= eot_id es especial ([_EOT_], [_BEG_], [_TT_xxx]) y se descarta.
@@ -210,7 +255,9 @@ impl LocalAgreementStreamer {
     /// Confirma todos los tokens restantes y limpia el estado para el siguiente dictado.
     pub fn flush_final(&mut self) -> Result<PartialTranscript, SttError> {
         let ctx = self.ctx.as_ref().ok_or_else(|| {
-            SttError::ModelNotFound(std::path::PathBuf::from("<LocalAgreementStreamer: modelo no cargado>"))
+            SttError::ModelNotFound(std::path::PathBuf::from(
+                "<LocalAgreementStreamer: modelo no cargado>",
+            ))
         })?;
 
         // En la pasada final confirmamos absolutamente todo lo que queda
@@ -281,7 +328,8 @@ fn tokens_to_string(ctx: &WhisperContext, tokens: &[i32]) -> Result<String, SttE
             bytes.extend_from_slice(b);
         }
     }
-    String::from_utf8(bytes).map_err(|e| SttError::Backend(format!("invalid utf8 from tokens: {e:?}")))
+    String::from_utf8(bytes)
+        .map_err(|e| SttError::Backend(format!("invalid utf8 from tokens: {e:?}")))
 }
 
 #[cfg(test)]
@@ -300,7 +348,14 @@ mod tests {
 
     #[test]
     fn test_streamer_reset() {
-        let mut streamer = LocalAgreementStreamer::new(None, crate::GpuConfig { use_gpu: false, flash_attn: false }, 1);
+        let mut streamer = LocalAgreementStreamer::new(
+            None,
+            crate::GpuConfig {
+                use_gpu: false,
+                flash_attn: false,
+            },
+            1,
+        );
         streamer.prev_tokens = vec![1, 2, 3];
         streamer.confirmed_count = 2;
         streamer.reset();

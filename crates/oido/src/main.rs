@@ -35,6 +35,12 @@ struct Cli {
     #[arg(long)]
     lang: Option<String>,
 
+    /// Configura el prompt personalizado de whisper.cpp. Si se pasa,
+    /// activa automáticamente `prompt_preset = custom`. Vacío = volver
+    /// al preset por defecto (bilingüe ES/EN).
+    #[arg(long)]
+    set_prompt: Option<String>,
+
     /// Realiza un reporte de diagnóstico del sistema y sale
     #[arg(long)]
     check: bool,
@@ -52,6 +58,12 @@ enum ControlMessage {
     SetTrayState(TrayState),
     SetTheme(Theme),
     SetSttMode(oido_config::SttMode),
+    /// Click sobre el submenú "Idioma de la interfaz". Provoca un
+    /// `rebuild_menu` con los nuevos strings.
+    SetUiLanguage(oido_config::UiLanguage),
+    /// Click sobre el submenú "Prompt del sistema". El bin decide qué
+    /// texto concreto se inyecta a whisper.cpp (preset vs. custom).
+    SetPromptPreset(oido_config::PromptPreset),
     Exit,
     /// Reconstruye el submenú "Modelos" con el estado actual del disco.
     /// Se envía tras una descarga o tras activar un modelo distinto,
@@ -69,6 +81,39 @@ fn resolve_models_dir() -> PathBuf {
     oido_config::models_dir()
 }
 
+/// Resuelve el texto del system prompt que se inyectará a whisper.cpp
+/// a partir del `Config`. El default es bilingüe ES/EN para anclar el
+/// idioma de salida y reducir alucinaciones a un tercer idioma.
+///
+/// - `BilingualEsEn`: texto fijo.
+/// - `SpanishOnly` / `EnglishOnly`: textos monolingües cortos.
+/// - `Custom`: el texto crudo de `Config::system_prompt`. Si está
+///   vacío, devolvemos el bilingüe (no se inyecta prompt vacío: eso
+///   dispara alucinaciones distintas a las de no-pasar-prompt).
+fn resolve_prompt_text(snap: &oido_config::Config) -> String {
+    use oido_config::PromptPreset;
+    match snap.prompt_preset {
+        PromptPreset::BilingualEsEn => "Hola, voy a dictar en español e inglés. \
+             Hello, I will dictate in Spanish and English."
+            .to_string(),
+        PromptPreset::SpanishOnly => "Hola, voy a dictar en español. ".to_string(),
+        PromptPreset::EnglishOnly => "Hello, I will dictate in English. ".to_string(),
+        PromptPreset::Custom => {
+            if snap.system_prompt.is_empty() {
+                tracing::warn!(
+                    "prompt_preset=Custom pero system_prompt vacío; \
+                     cayendo al preset bilingüe por defecto"
+                );
+                "Hola, voy a dictar en español e inglés. \
+                 Hello, I will dictate in Spanish and English."
+                    .to_string()
+            } else {
+                snap.system_prompt.clone()
+            }
+        }
+    }
+}
+
 /// Nombre del archivo del modelo Silero-VAD (formato GGML, requerido
 /// por whisper.cpp; NO funciona ONNX).
 const VAD_MODEL_FILENAME: &str = "ggml-silero-v5.1.2.bin";
@@ -79,9 +124,13 @@ const VAD_MODEL_FILENAME: &str = "ggml-silero-v5.1.2.bin";
 const VAD_MODEL_URL: &str =
     "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
 
-/// Devuelve la ruta al modelo VAD si existe en disco. Si no, intenta
-/// descargarlo vía `scripts/download_vad.{ps1,sh}`; si la descarga
-/// falla, devuelve `None` y el STT funcionará sin VAD (fallback graceful).
+/// Devuelve la ruta al modelo VAD solo si ya existe en disco.
+///
+/// Optimización startup: la fase síncrona de `main` antes del control
+/// loop **no descarga** nada. Si el archivo existe, devolvemos la
+/// ruta al instante (un `path.exists()` es ~µs). Si no existe, se
+/// delega al thread lazy-loader (`oido-lazy-loader`), donde la
+/// descarga bloqueante no afecta `startup_total`.
 ///
 /// No añadimos un cliente HTTP al workspace para mantener el árbol de
 /// deps ligero (consistente con la estrategia del modelo whisper
@@ -89,17 +138,29 @@ const VAD_MODEL_URL: &str =
 fn resolve_vad_model_path(models_dir: &Path) -> Option<PathBuf> {
     let path = models_dir.join(VAD_MODEL_FILENAME);
     if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Versión bloqueante de `resolve_vad_model_path`: intenta descargar
+/// el modelo VAD vía `scripts/download_vad.{ps1,sh}`. Pensada para
+/// correr **off** del main thread (en el lazy-loader).
+///
+/// Si el script no existe o falla, devuelve `None` y el STT seguirá
+/// funcionando sin VAD (fallback graceful que ya existe en el camino
+/// rápido).
+fn download_vad_model_blocking(models_dir: &Path) -> Option<PathBuf> {
+    let path = models_dir.join(VAD_MODEL_FILENAME);
+    if path.exists() {
         return Some(path);
     }
     tracing::info!(
         path = ?path,
         url = VAD_MODEL_URL,
-        "modelo VAD no encontrado; intentando descarga vía scripts/download_vad.*"
+        "modelo VAD no encontrado; descargando vía scripts/download_vad.* (en background)"
     );
-    // Construye el comando según el SO. Mantenemos esto simple: en
-    // Windows invocamos PowerShell con un script .ps1, en Unix bash con
-    // un script .sh. Si el script no existe o falla, devolvemos None
-    // (STT funcionará sin VAD).
     #[cfg(windows)]
     let cmd_result = std::process::Command::new("powershell")
         .arg("-ExecutionPolicy")
@@ -308,6 +369,25 @@ fn format_config_table(config: &Config, models_dir: &Path) -> String {
         "│ Tema                     │ {:<29} │\n",
         theme_str
     ));
+    let ui_lang_str = match config.ui_language {
+        oido_config::UiLanguage::Es => "es",
+        oido_config::UiLanguage::En => "en",
+        oido_config::UiLanguage::Bilingual => "bilingual",
+    };
+    s.push_str(&format!(
+        "│ Idioma del Menú          │ {:<29} │\n",
+        ui_lang_str
+    ));
+    let prompt_str = match config.prompt_preset {
+        oido_config::PromptPreset::BilingualEsEn => "Bilingüe ES+EN",
+        oido_config::PromptPreset::SpanishOnly => "Solo español",
+        oido_config::PromptPreset::EnglishOnly => "Solo inglés",
+        oido_config::PromptPreset::Custom => "Personalizado",
+    };
+    s.push_str(&format!(
+        "│ System Prompt            │ {:<29} │\n",
+        prompt_str
+    ));
     s.push_str("├──────────────────────────┼───────────────────────────────┤\n");
     let models_dir_str = models_dir.to_string_lossy();
     let truncated_dir = if models_dir_str.len() > 29 {
@@ -398,6 +478,12 @@ fn main() -> Result<()> {
     // es bajar este número drásticamente con carga diferida del modelo.
     let startup_total = Instant::now();
 
+    // DPI awareness PER-MONITOR V2: debe ser lo **primero** que el
+    // proceso hace en Windows. Sin esto, en pantallas HiDPI/4K el
+    // icono y los textos salen borrosos (Windows estira el bitmap).
+    // No-op fuera de Windows.
+    oido_platform::enable_dpi_awareness();
+
     // Inicializar logger con soporte para colores ANSI y salida a stderr
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -451,6 +537,19 @@ fn main() -> Result<()> {
         changed = true;
     }
 
+    if let Some(ref prompt) = cli.set_prompt {
+        if prompt.is_empty() {
+            // `--set-prompt ""` resetea al preset por defecto (bilingüe).
+            snap.prompt_preset = oido_config::PromptPreset::BilingualEsEn;
+            snap.system_prompt.clear();
+        } else {
+            snap.prompt_preset = oido_config::PromptPreset::Custom;
+            snap.system_prompt = prompt.clone();
+        }
+        changed = true;
+        tracing::info!(?snap.prompt_preset, "system prompt actualizado por CLI");
+    }
+
     if changed {
         cfg.replace(snap.clone());
         cfg.save().context("guardando cambios de config CLI")?;
@@ -497,7 +596,13 @@ fn main() -> Result<()> {
     // que añadir una sección, basta con sumar un struct que implemente
     // `MenuSection` y agregarlo a la lista — `tray.rs::build_menu`
     // deja de tocar.
-    let mut tray = PlatformTray::new(models_dir.clone(), snap.model.clone()).ok();
+    let mut tray = PlatformTray::new(
+        models_dir.clone(),
+        snap.model.clone(),
+        snap.ui_language,
+        snap.prompt_preset,
+    )
+    .ok();
     let menu_rx = tray.as_mut().and_then(|t| t.take_menu_events());
     tracing::info!(
         phase = "tray_init",
@@ -531,15 +636,19 @@ fn main() -> Result<()> {
         (total / STT_WORKERS).max(2)
     });
 
-    // VAD nativo: si el modelo GGML existe (o se descarga), activamos
-    // el recorte de silencios que hace whisper.cpp antes del encoder.
-    // Si no, fallback graceful (STT sigue funcionando).
+    // VAD nativo: si el modelo GGML existe, activamos el recorte de
+    // silencios que hace whisper.cpp antes del encoder. Si NO existe,
+    // el lazy-loader intentará descargarlo **off** del main thread
+    // (ver `download_vad_model_blocking`). Esto evita que un primer
+    // arranque sin VAD pague los segundos de red en `startup_total`.
+    // Si la descarga falla, fallback graceful (STT sigue funcionando).
     let t_vad = Instant::now();
     let vad_path = resolve_vad_model_path(&models_dir);
     tracing::info!(
         phase = "vad_resolve",
         elapsed_ms = t_vad.elapsed().as_millis() as u64,
         vad_available = vad_path.is_some(),
+        defer_download_if_missing = vad_path.is_none(),
         "startup phase completa"
     );
     if vad_path.is_none() {
@@ -559,8 +668,13 @@ fn main() -> Result<()> {
     let mut streamer: Option<oido_stt::LocalAgreementStreamer> = None;
 
     if stt_mode == oido_config::SttMode::Batch {
-        let mut stt_builder =
-            WhisperCpp::with_language(&snap.language_ui).with_runtime(gpu_config, n_threads_per_worker);
+        // System prompt resuelto una sola vez al startup; si cambia
+        // en runtime via menú/CLI, se propaga via `set_initial_prompt`
+        // sobre el `SharedTranscriber` (no requiere recargar el modelo).
+        let prompt = resolve_prompt_text(&snap);
+        let mut stt_builder = WhisperCpp::with_language(&snap.language_ui)
+            .with_initial_prompt(&prompt)
+            .with_runtime(gpu_config, n_threads_per_worker);
         let stt = if let Some(ref vp) = vad_path {
             stt_builder = stt_builder.with_vad(vp.clone());
             stt_builder
@@ -574,6 +688,7 @@ fn main() -> Result<()> {
         // a través del trait.
         tracing::info!(
             path = ?model_path,
+            prompt_chars = prompt.chars().count(),
             "modelo whisper NO se carga al startup (lazy); se cargará en el primer press del hotkey"
         );
         let shared = SharedTranscriber::new(stt);
@@ -581,11 +696,13 @@ fn main() -> Result<()> {
         shared_transcriber = Some(Arc::clone(&shared_arc));
         transcriber = Some(shared_arc as Arc<dyn Transcriber>);
     } else {
+        let prompt = resolve_prompt_text(&snap);
         let st = oido_stt::LocalAgreementStreamer::new(
             Some(snap.language_ui.clone()),
             gpu_config,
             n_threads_per_worker,
-        );
+        )
+        .with_initial_prompt(&prompt);
         // **Lazy load**: ver comentario en la rama Batch. El modelo
         // streaming se carga en la primera pulsación del hotkey.
         tracing::info!(
@@ -616,6 +733,13 @@ fn main() -> Result<()> {
                         }
                         MenuAction::SetSttMode(mode) => {
                             let _ = control_tx_for_menu.send(ControlMessage::SetSttMode(mode));
+                        }
+                        MenuAction::SetUiLanguage(lang) => {
+                            let _ = control_tx_for_menu.send(ControlMessage::SetUiLanguage(lang));
+                        }
+                        MenuAction::SetPromptPreset(preset) => {
+                            let _ =
+                                control_tx_for_menu.send(ControlMessage::SetPromptPreset(preset));
                         }
                         MenuAction::OpenModelsDir => {
                             let models_dir = resolve_models_dir();
@@ -657,7 +781,12 @@ fn main() -> Result<()> {
     let model_path_for_pipeline = model_path.clone();
 
     // Función auxiliar para iniciar el pipeline
-    let start_pipeline = move |binding_str: &str, mode: oido_config::SttMode, tr_opt: &Option<Arc<dyn Transcriber>>, st_opt: &Option<oido_stt::LocalAgreementStreamer>, shared_opt: &Option<Arc<SharedTranscriber>>| -> Result<(ActivePipeline, JoinHandle<()>)> {
+    let start_pipeline = move |binding_str: &str,
+                               mode: oido_config::SttMode,
+                               tr_opt: &Option<Arc<dyn Transcriber>>,
+                               st_opt: &Option<oido_stt::LocalAgreementStreamer>,
+                               shared_opt: &Option<Arc<SharedTranscriber>>|
+          -> Result<(ActivePipeline, JoinHandle<()>)> {
         let capture = Box::new(CpalCapture::new().context("init captura audio")?);
         // `GatedHotkey` envuelve el `RdevHotkey` y suprime los callbacks
         // de press/release hasta que se llame `mark_ready()` en el handle
@@ -678,7 +807,9 @@ fn main() -> Result<()> {
         let injector = ArboardInjector::new().context("init injector clipboard")?;
 
         let mut active_pipe = if mode == oido_config::SttMode::Batch {
-            let tr = tr_opt.clone().context("transcriber no cargado en modo batch")?;
+            let tr = tr_opt
+                .clone()
+                .context("transcriber no cargado en modo batch")?;
             let pipeline_cfg = PipelineConfig {
                 capture,
                 transcriber: tr,
@@ -688,7 +819,9 @@ fn main() -> Result<()> {
             };
             ActivePipeline::Batch(Pipeline::new(pipeline_cfg))
         } else {
-            let st = st_opt.clone().context("streamer no cargado en modo streaming")?;
+            let st = st_opt
+                .clone()
+                .context("streamer no cargado en modo streaming")?;
             let pipeline_cfg = oido_core::StreamingPipelineConfig {
                 capture,
                 streamer: Box::new(st),
@@ -735,14 +868,16 @@ fn main() -> Result<()> {
         // usuario funcionará normalmente.
         let control_tx_for_lazy = control_tx_for_start.clone();
         let model_path_for_lazy = model_path_for_pipeline.clone();
-        let shared_for_lazy: Option<Arc<SharedTranscriber>> =
-            shared_opt.as_ref().map(Arc::clone);
+        let shared_for_lazy: Option<Arc<SharedTranscriber>> = shared_opt.as_ref().map(Arc::clone);
+        // Si el modelo VAD no estaba en disco al startup, intentamos
+        // descargarlo off del thread principal. No bloquea `startup_total`.
+        let models_dir_for_lazy = resolve_models_dir();
+        let did_vad_exist_at_startup = models_dir_for_lazy.join(VAD_MODEL_FILENAME).exists();
         thread::Builder::new()
             .name("oido-lazy-loader".into())
             .spawn(move || {
                 // Notificamos al bin que estamos cargando.
-                let _ = control_tx_for_lazy
-                    .send(ControlMessage::SetTrayState(TrayState::Loading));
+                let _ = control_tx_for_lazy.send(ControlMessage::SetTrayState(TrayState::Loading));
 
                 let t = Instant::now();
                 let load_result: anyhow::Result<()> = if mode == oido_config::SttMode::Batch {
@@ -780,7 +915,10 @@ fn main() -> Result<()> {
                                 warmup_ms = started.elapsed().as_millis() as u64,
                                 "warm-up STT lazy completado"
                             ),
-                            Err(e) => tracing::warn!(?e, "warm-up lazy falló; el primer dictado será más lento"),
+                            Err(e) => tracing::warn!(
+                                ?e,
+                                "warm-up lazy falló; el primer dictado será más lento"
+                            ),
                         }
                     } else {
                         tracing::error!("lazy load Batch: shared_transcriber no disponible");
@@ -804,9 +942,28 @@ fn main() -> Result<()> {
 
                 if let Err(e) = load_result {
                     tracing::error!(?e, "lazy load falló");
-                    let _ = control_tx_for_lazy
-                        .send(ControlMessage::SetTrayState(TrayState::Error));
+                    let _ =
+                        control_tx_for_lazy.send(ControlMessage::SetTrayState(TrayState::Error));
                     return;
+                }
+
+                // Si el VAD no estaba al startup, intentamos descargarlo
+                // ahora (off del main thread). Esto no bloquea
+                // `startup_total`. Si falla, el STT sigue sin VAD
+                // (el STT ya se construyó sin vad_path al inicio).
+                if !did_vad_exist_at_startup && mode == oido_config::SttMode::Batch {
+                    let t_vad_dl = Instant::now();
+                    let vad_downloaded = download_vad_model_blocking(&models_dir_for_lazy);
+                    tracing::info!(
+                        phase = "vad_download_lazy",
+                        elapsed_ms = t_vad_dl.elapsed().as_millis() as u64,
+                        downloaded = vad_downloaded.is_some(),
+                        "intento de descarga VAD post-startup (en lazy-loader)"
+                    );
+                    // NOTA: si la descarga tuvo éxito, recargar el modelo
+                    // con VAD requeriría reiniciar el loader. Por ahora
+                    // solo aplicaría al siguiente `SetSttMode`. Queda
+                    // como optim opcional (`refresh_vad_post_download`).
                 }
 
                 tracing::info!(
@@ -996,7 +1153,9 @@ fn main() -> Result<()> {
                             streamer = None; // Liberar memoria de streaming
                             if transcriber.is_none() {
                                 tracing::info!("Cargando modelo whisper en modo Batch...");
+                                let prompt = resolve_prompt_text(&snap);
                                 let mut stt_builder = WhisperCpp::with_language(&snap.language_ui)
+                                    .with_initial_prompt(&prompt)
                                     .with_runtime(gpu_config, n_threads_per_worker);
                                 if let Some(vp) = vad_path.as_ref() {
                                     stt_builder = stt_builder.with_vad(vp.clone());
@@ -1013,13 +1172,18 @@ fn main() -> Result<()> {
                             transcriber = None; // Liberar memoria de batch
                             if streamer.is_none() {
                                 tracing::info!("Cargando modelo whisper en modo Streaming...");
+                                let prompt = resolve_prompt_text(&snap);
                                 let mut st = oido_stt::LocalAgreementStreamer::new(
                                     Some(snap.language_ui.clone()),
                                     gpu_config,
                                     n_threads_per_worker,
-                                );
+                                )
+                                .with_initial_prompt(&prompt);
                                 if let Err(e) = st.load_model(&model_path) {
-                                    tracing::warn!(?e, "no se pudo cargar el modelo en modo Streaming");
+                                    tracing::warn!(
+                                        ?e,
+                                        "no se pudo cargar el modelo en modo Streaming"
+                                    );
                                 } else {
                                     let _ = st.warm_up();
                                     streamer = Some(st);
@@ -1045,7 +1209,11 @@ fn main() -> Result<()> {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(?e, "no se pudo arrancar el pipeline en modo {:?}", mode);
+                                tracing::error!(
+                                    ?e,
+                                    "no se pudo arrancar el pipeline en modo {:?}",
+                                    mode
+                                );
                             }
                         }
                     }
@@ -1053,12 +1221,95 @@ fn main() -> Result<()> {
                 ControlMessage::Exit => {
                     should_exit = true;
                 }
+                ControlMessage::SetUiLanguage(lang) => {
+                    let mut snap = cfg.snapshot();
+                    snap.ui_language = lang;
+                    cfg.replace(snap);
+                    if let Err(e) = cfg.save() {
+                        tracing::error!(?e, "no se pudo guardar la configuración de idioma");
+                    } else {
+                        tracing::info!(?lang, "idioma de UI actualizado");
+                    }
+                    // Reconstruir el árbol del menú con los nuevos
+                    // strings. Mantenemos el tema, modo, prompt, etc. del
+                    // snapshot actual.
+                    let snap = cfg.snapshot();
+                    let ctx = oido_platform::tray::sections::BuildContext {
+                        models_dir: resolve_models_dir(),
+                        active_model: snap.model.clone(),
+                        ui_language: snap.ui_language,
+                        theme: snap.theme,
+                        stt_mode: snap.stt_mode,
+                        prompt_preset: snap.prompt_preset,
+                        prompt_custom_text: snap.system_prompt.clone(),
+                    };
+                    if let Some(ref mut t) = tray {
+                        let sections = oido_platform::tray::sections::default_sections(&ctx);
+                        if let Err(e) = t.rebuild_menu(sections) {
+                            tracing::error!(
+                                ?e,
+                                "no se pudo reconstruir el menú tras cambio de idioma"
+                            );
+                        }
+                    }
+                }
+                ControlMessage::SetPromptPreset(preset) => {
+                    let mut snap = cfg.snapshot();
+                    snap.prompt_preset = preset;
+                    // Si el usuario entra en Custom sin texto, conservamos
+                    // el system_prompt previo (no se borra). La edición del
+                    // texto solo es posible vía `--set-prompt`.
+                    cfg.replace(snap);
+                    if let Err(e) = cfg.save() {
+                        tracing::error!(?e, "no se pudo guardar la configuración de prompt");
+                    } else {
+                        tracing::info!(?preset, "preset de prompt actualizado");
+                    }
+                    // Propagar al STT en runtime (Batch y/o Streaming)
+                    // sin recargar el modelo. Toma el lock brevemente.
+                    let snap = cfg.snapshot();
+                    let prompt = resolve_prompt_text(&snap);
+                    if let Some(shared) = &shared_transcriber {
+                        shared.set_initial_prompt(prompt.clone());
+                        tracing::info!("system prompt propagado a SharedTranscriber");
+                    }
+                    if let Some(stream) = streamer.as_mut() {
+                        stream.set_initial_prompt(prompt.clone());
+                        tracing::info!("system prompt propagado a LocalAgreementStreamer");
+                    }
+                    // Reconstruir el menú para refrescar la marca ✓ del
+                    // preset activo y el preview del texto custom.
+                    let ctx = oido_platform::tray::sections::BuildContext {
+                        models_dir: resolve_models_dir(),
+                        active_model: snap.model.clone(),
+                        ui_language: snap.ui_language,
+                        theme: snap.theme,
+                        stt_mode: snap.stt_mode,
+                        prompt_preset: snap.prompt_preset,
+                        prompt_custom_text: snap.system_prompt.clone(),
+                    };
+                    if let Some(ref mut t) = tray {
+                        let sections = oido_platform::tray::sections::default_sections(&ctx);
+                        if let Err(e) = t.rebuild_menu(sections) {
+                            tracing::error!(
+                                ?e,
+                                "no se pudo reconstruir el menú tras cambio de prompt"
+                            );
+                        }
+                    }
+                }
                 ControlMessage::RefreshMenu => {
                     let snap = cfg.snapshot();
-                    let sections = oido_platform::tray::sections::default_sections(
-                        resolve_models_dir(),
-                        snap.model.clone(),
-                    );
+                    let ctx = oido_platform::tray::sections::BuildContext {
+                        models_dir: resolve_models_dir(),
+                        active_model: snap.model.clone(),
+                        ui_language: snap.ui_language,
+                        theme: snap.theme,
+                        stt_mode: snap.stt_mode,
+                        prompt_preset: snap.prompt_preset,
+                        prompt_custom_text: snap.system_prompt.clone(),
+                    };
+                    let sections = oido_platform::tray::sections::default_sections(&ctx);
                     if let Some(ref mut t) = tray {
                         if let Err(e) = t.rebuild_menu(sections) {
                             tracing::error!(?e, "no se pudo reconstruir el menú");

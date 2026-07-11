@@ -39,6 +39,50 @@ fn default_stt_mode() -> SttMode {
     SttMode::Batch
 }
 
+/// Idioma de los strings del menú nativo de bandeja.
+///
+/// NO controla el idioma de transcripción de whisper.cpp (eso vive en
+/// `Config::language_ui`). El default es `Es` para mantener el árbol
+/// de menú idéntico al de versiones anteriores (todos los labels
+/// estaban hardcodeados en español).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLanguage {
+    Es,
+    En,
+    /// Mixto: secciones críticas bilingües, resto en ES. Útil para
+    /// usuarios que leen ambos idiomas.
+    Bilingual,
+}
+
+fn default_ui_language() -> UiLanguage {
+    UiLanguage::Es
+}
+
+/// Preset del prompt inicial que se pasa a whisper.cpp vía
+/// `FullParams::set_initial_prompt`. Ancla el idioma de salida y reduce
+/// alucinaciones a un tercer idioma cuando el audio es ambiguo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptPreset {
+    /// Default. Texto fijo con marcadores en ES + EN.
+    BilingualEsEn,
+    SpanishOnly,
+    EnglishOnly,
+    /// El texto crudo vive en `Config::system_prompt`. Si está vacío,
+    /// `resolve_prompt_text` cae al preset BilingualEsEn (no se inyecta
+    /// un prompt vacío, que dispara otra clase de alucinaciones).
+    Custom,
+}
+
+fn default_prompt_preset() -> PromptPreset {
+    PromptPreset::BilingualEsEn
+}
+
+fn default_system_prompt() -> String {
+    String::new()
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -69,6 +113,17 @@ pub struct Config {
     /// Modo de transcripción. Default: `Batch` (por lotes, hold-to-talk clásico).
     #[serde(default = "default_stt_mode")]
     pub stt_mode: SttMode,
+    /// Idioma de los labels del menú nativo de bandeja. NO afecta al
+    /// idioma de transcripción (eso sigue en `language_ui`).
+    #[serde(default = "default_ui_language")]
+    pub ui_language: UiLanguage,
+    /// Preset del system prompt que se inyecta a whisper.cpp.
+    #[serde(default = "default_prompt_preset")]
+    pub prompt_preset: PromptPreset,
+    /// Texto crudo del prompt personalizado. Solo se usa si
+    /// `prompt_preset == Custom`. Vacío por default.
+    #[serde(default = "default_system_prompt")]
+    pub system_prompt: String,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
@@ -90,6 +145,9 @@ impl Default for Config {
             n_threads: None,
             theme: default_theme(),
             stt_mode: default_stt_mode(),
+            ui_language: default_ui_language(),
+            prompt_preset: default_prompt_preset(),
+            system_prompt: default_system_prompt(),
         }
     }
 }
@@ -219,9 +277,21 @@ mod tests {
                 proptest::option::of(1u16..=16),
                 proptest::sample::select(vec![Theme::Dark, Theme::Light, Theme::System]),
                 proptest::sample::select(vec![SttMode::Batch, SttMode::Streaming]),
+                proptest::sample::select(vec![
+                    UiLanguage::Es,
+                    UiLanguage::En,
+                    UiLanguage::Bilingual,
+                ]),
+                proptest::sample::select(vec![
+                    PromptPreset::BilingualEsEn,
+                    PromptPreset::SpanishOnly,
+                    PromptPreset::EnglishOnly,
+                    PromptPreset::Custom,
+                ]),
+                any::<String>(),
             )
                 .prop_map(
-                    |(hotkey, model, language_ui, use_gpu, n_threads, theme, stt_mode)| Self {
+                    |(
                         hotkey,
                         model,
                         language_ui,
@@ -229,6 +299,20 @@ mod tests {
                         n_threads,
                         theme,
                         stt_mode,
+                        ui_language,
+                        prompt_preset,
+                        system_prompt,
+                    )| Self {
+                        hotkey,
+                        model,
+                        language_ui,
+                        use_gpu,
+                        n_threads,
+                        theme,
+                        stt_mode,
+                        ui_language,
+                        prompt_preset,
+                        system_prompt,
                     },
                 )
                 .boxed()
@@ -243,6 +327,9 @@ mod tests {
         assert_eq!(cfg.language_ui, "es");
         assert!(cfg.n_threads.is_none());
         assert_eq!(cfg.stt_mode, SttMode::Batch);
+        assert_eq!(cfg.ui_language, UiLanguage::Es);
+        assert_eq!(cfg.prompt_preset, PromptPreset::BilingualEsEn);
+        assert!(cfg.system_prompt.is_empty());
     }
 
     #[test]
@@ -270,6 +357,47 @@ mod tests {
         let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
         let cfg: Config = serde_json::from_str(json).expect("JSON sin theme debe parsear");
         assert_eq!(cfg.theme, Theme::System);
+    }
+
+    /// Configs previas a la introducción de i18n/system_prompt deben
+    /// parsear con los nuevos defaults. Garantiza retro-compat cuando
+    /// un usuario actualiza desde una versión sin estas features.
+    #[test]
+    fn backward_compat_missing_i18n_fields_use_defaults() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON sin i18n debe parsear");
+        assert_eq!(cfg.ui_language, UiLanguage::Es);
+        assert_eq!(cfg.prompt_preset, PromptPreset::BilingualEsEn);
+        assert!(cfg.system_prompt.is_empty());
+    }
+
+    /// El prompt personalizado puede persistirse y recuperarse intacto.
+    #[test]
+    fn system_prompt_roundtrips_when_custom() {
+        let cfg = Config {
+            prompt_preset: PromptPreset::Custom,
+            system_prompt: "Dictaré jerga técnica: kubernetes, gRPC, WASM.".into(),
+            ..Config::default()
+        };
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let back: Config = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.system_prompt, cfg.system_prompt);
+        assert_eq!(back.prompt_preset, PromptPreset::Custom);
+    }
+
+    /// El enum `UiLanguage` se serializa en kebab-case-compatible
+    /// lowercase para alinear con el resto de la config y que el
+    /// usuario pueda editar `config.json` a mano.
+    #[test]
+    fn ui_language_serializes_lowercase() {
+        for (lang, expected) in [
+            (UiLanguage::Es, "\"es\""),
+            (UiLanguage::En, "\"en\""),
+            (UiLanguage::Bilingual, "\"bilingual\""),
+        ] {
+            let s = serde_json::to_string(&lang).unwrap();
+            assert_eq!(s, expected, "UiLanguage::{lang:?} esperaba {expected}");
+        }
     }
 
     #[test]

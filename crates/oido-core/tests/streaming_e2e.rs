@@ -4,16 +4,16 @@
 //! e inyección de texto por teclado individual, controlando de manera precisa
 //! las pasadas temporales y el algoritmo de LocalAgreement-2.
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use parking_lot::Mutex;
 
 use crossbeam_channel::Sender;
-use oido_core::{StreamingPipeline, StreamingPipelineConfig, PipelineEvent, PipelineState};
+use oido_core::{PipelineEvent, PipelineState, StreamingPipeline, StreamingPipelineConfig};
 use oido_platform::{AudioFrame, CaptureSource, Hotkey, Injector, PlatformError};
-use oido_stt::{SttError, PartialTranscript, Streamer};
+use oido_stt::{PartialTranscript, Streamer, SttError};
 
 // ----- Mock capture ---------------------------------------------------------
 #[derive(Debug)]
@@ -321,7 +321,11 @@ fn test_streaming_e2e_normal_dictation() {
 
     // 1) Presionamos tecla -> Estado cambia a Recording
     hotkey_handle.press();
-    assert!(wait_for_state(&events, PipelineState::Recording, Duration::from_millis(200)));
+    assert!(wait_for_state(
+        &events,
+        PipelineState::Recording,
+        Duration::from_millis(200)
+    ));
 
     // Mandamos algo de audio
     capture_handle.send(AudioFrame {
@@ -345,8 +349,16 @@ fn test_streaming_e2e_normal_dictation() {
 
     // 2) Soltamos tecla -> triggers final flush
     hotkey_handle.release();
-    assert!(wait_for_state(&events, PipelineState::Processing, Duration::from_millis(200)));
-    assert!(wait_for_state(&events, PipelineState::Idle, Duration::from_millis(200)));
+    assert!(wait_for_state(
+        &events,
+        PipelineState::Processing,
+        Duration::from_millis(200)
+    ));
+    assert!(wait_for_state(
+        &events,
+        PipelineState::Idle,
+        Duration::from_millis(200)
+    ));
 
     // Confirmar que el flush final inyectó la última parte "!" y se llamó al reset del streamer
     assert_eq!(injector_handle.texts(), vec!["Hello ", "world", "!"]);
@@ -375,12 +387,10 @@ fn test_streaming_e2e_multiple_cycles_resets() {
     pipeline.start().unwrap();
 
     // --- Ciclo 1 ---
-    streamer_handle.set_process_responses(vec![
-        PartialTranscript {
-            confirmed: "One ".to_owned(),
-            unconfirmed: String::new(),
-        }
-    ]);
+    streamer_handle.set_process_responses(vec![PartialTranscript {
+        confirmed: "One ".to_owned(),
+        unconfirmed: String::new(),
+    }]);
     streamer_handle.set_flush_response(PartialTranscript {
         confirmed: "Two".to_owned(),
         unconfirmed: String::new(),
@@ -396,12 +406,10 @@ fn test_streaming_e2e_multiple_cycles_resets() {
     assert!(streamer_handle.was_reset_called());
 
     // --- Ciclo 2 ---
-    streamer_handle.set_process_responses(vec![
-        PartialTranscript {
-            confirmed: "Three ".to_owned(),
-            unconfirmed: String::new(),
-        }
-    ]);
+    streamer_handle.set_process_responses(vec![PartialTranscript {
+        confirmed: "Three ".to_owned(),
+        unconfirmed: String::new(),
+    }]);
     streamer_handle.set_flush_response(PartialTranscript {
         confirmed: "Four".to_owned(),
         unconfirmed: String::new(),
@@ -413,7 +421,10 @@ fn test_streaming_e2e_multiple_cycles_resets() {
     hotkey_handle.release();
     thread::sleep(Duration::from_millis(50));
 
-    assert_eq!(injector_handle.texts(), vec!["One ", "Two", "Three ", "Four"]);
+    assert_eq!(
+        injector_handle.texts(),
+        vec!["One ", "Two", "Three ", "Four"]
+    );
     assert!(streamer_handle.was_reset_called());
 }
 

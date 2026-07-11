@@ -258,6 +258,7 @@ fn draw_arc_bottom(buf: &mut [u8], cx: u32, cy: u32, r_outer: u32, r_inner: u32,
 /// Arco centrado en (cx, cy) entre los ángulos `start` y `end` (radianes,
 /// 0 = +x, creciendo CCW). Rellena el grosor entre `r_outer` y `r_inner`.
 /// Se usa para el estado `Loading` (anillo de progreso estático).
+#[allow(clippy::too_many_arguments)]
 fn draw_arc_segment(
     buf: &mut [u8],
     cx: u32,
