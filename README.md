@@ -33,6 +33,23 @@ El modelo se guarda bajo `%APPDATA%\oido\models\` (Win) o
 `~/Library/Application Support/oido/models/` (macOS). Override con la env
 var `OIDO_MODELS_DIR` o pasale `-TargetDir` / primer argumento al script.
 
+## Windows Installation
+
+Oido is distributed on Windows as a native MSI installer.
+
+### Downloading & Installing
+1. Download the latest `.msi` file from the [GitHub Releases](https://github.com/Santirrini/oido-rs/releases).
+2. Double-click the installer. It will install Oido locally under `%LOCALAPPDATA%\Programs\Oido` without requiring administrator privileges (no UAC elevation).
+3. The installer automatically adds a **Start Menu shortcut** named `Oido` so you can launch the app easily.
+
+### Microsoft Defender SmartScreen
+> [!NOTE]
+> Since the MSI installer is not signed with a commercial EV Code Signing certificate, you may see a Microsoft Defender SmartScreen warning ("Windows protected your PC") on first run.
+> 
+> To bypass this:
+> 1. Click on **More info** inside the SmartScreen dialog.
+> 2. Click the **Run anyway** button to proceed with the installation.
+
 ## Goals
 
 - **100% local** STT via whisper.cpp (quantized ggml models).

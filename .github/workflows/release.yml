@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build Oido
+        shell: powershell
+        run: |
+          cargo build --release -p oido --features updater
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          CMAKE_MSVC_RUNTIME_LIBRARY: "MultiThreaded"
+
+      - name: Verify static CRT (no vcruntime140.dll dependency)
+        shell: powershell
+        run: |
+          $deps = dumpbin /dependents target/release/oido.exe
+          Write-Output $deps
+          if ($deps -match "vcruntime140\.dll") {
+              Write-Error "Executable has a dependency on vcruntime140.dll!"
+              exit 1
+          }
+          Write-Host "Success: No dependency on vcruntime140.dll found."
+
+      - name: Add WiX to PATH
+        shell: powershell
+        run: |
+          echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run build-msi.ps1
+        shell: powershell
+        run: |
+          .\installer\build-msi.ps1
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oido-msi-installer
+          path: |
+            installer/dist/*.msi
+            installer/dist/*.sha256
+
+  smoke-test:
+    needs: build-msi
+    runs-on: windows-latest
+    steps:
+      - name: Download MSI Installer
+        uses: actions/download-artifact@v4
+        with:
+          name: oido-msi-installer
+          path: installer/dist/
+
+      - name: Find MSI File
+        shell: powershell
+        id: find_msi
+        run: |
+          $msi = Get-ChildItem -Path installer/dist/*.msi | Select-Object -First 1
+          echo "MSI_PATH=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Install MSI silently
+        shell: powershell
+        run: |
+          $msiPath = "${{ steps.find_msi.outputs.MSI_PATH }}"
+          Write-Host "Installing $msiPath silently..."
+          Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -NoNewWindow
+          
+          # Wait a few seconds for the file system to settle
+          Start-Sleep -Seconds 5
+
+      - name: Check oido.exe installation and run version check
+        shell: powershell
+        run: |
+          $installPath = "$env:LOCALAPPDATA\Programs\Oido\oido.exe"
+          Write-Host "Checking if oido.exe exists at $installPath..."
+          if (-not (Test-Path $installPath)) {
+              Write-Error "Oido executable not found after silent install!"
+              exit 1
+          }
+          
+          Write-Host "Running oido.exe --version..."
+          & "$installPath" --version
+
+      - name: Uninstall MSI silently
+        shell: powershell
+        run: |
+          $msiPath = "${{ steps.find_msi.outputs.MSI_PATH }}"
+          Write-Host "Uninstalling $msiPath silently..."
+          Start-Process msiexec.exe -ArgumentList "/x `"$msiPath`" /qn /norestart" -Wait -NoNewWindow
+          
+          # Wait a few seconds for the file system to settle
+          Start-Sleep -Seconds 5
+
+      - name: Verify cleanup
+        shell: powershell
+        run: |
+          $installDir = "$env:LOCALAPPDATA\Programs\Oido"
+          if (Test-Path "$installDir\oido.exe") {
+              Write-Error "Oido executable still exists after uninstall!"
+              exit 1
+          }
+          Write-Host "Cleanup verified. Oido directory/file removed."
+
+  release:
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download MSI Installer
+        uses: actions/download-artifact@v4
+        with:
+          name: oido-msi-installer
+          path: dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

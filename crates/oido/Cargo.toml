@@ -23,11 +23,19 @@ parking_lot.workspace = true
 crossbeam-channel.workspace = true
 clap.workspace = true
 open.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde.workspace = true
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls"], optional = true }
 oido-core = { path = "../oido-core", version = "0.1.0" }
 oido-config = { path = "../oido-config", version = "0.1.0" }
 oido-models = { path = "../oido-models", version = "0.1.0" }
 oido-platform = { path = "../oido-platform", version = "0.1.0" }
 oido-stt = { path = "../oido-stt", version = "0.1.0" }
+
+[features]
+updater = ["dep:self_update"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }

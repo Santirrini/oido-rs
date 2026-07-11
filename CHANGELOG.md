@@ -1,5 +1,26 @@
 # Changelog
 
+## Fase 5a - MSI Installer & Auto-Updater
+
+**Fecha:** 2026-07-11
+
+### MSI Installer & WiX Toolset
+- Created `installer/oido.wxs` source configuring a per-user, non-elevated installation to `%LOCALAPPDATA%\Programs\Oido` with Start Menu shortcut.
+- Created `installer/build-msi.ps1` to orchestrate release builds, staging, WiX `candle`/`light` compilation, and SHA256 checksum generation.
+- Configured static CRT (`+crt-static`) in `.cargo/config.toml` to eliminate runtime dependencies on `vcruntime140.dll`.
+
+### Auto-Update System
+- Integrated `self_update` dependency with `updater` feature in `crates/oido/Cargo.toml`.
+- Implemented `crates/oido/src/updater.rs` to fetch latest GitHub releases, verify SHA256 checksums, and trigger quiet MSI installations via `msiexec`.
+- Added CLI hook `--check-update` for synchronous updates and background worker thread checking for the Tray menu's "Check for Updates" action.
+
+### Startup Experience & Models
+- Implemented native MessageBox dialog on Windows at startup if the configured model or all `.bin` models are missing, offering a direct download of `ggml-base.bin`.
+- Spawns background thread for model download and automatic activation upon confirmation.
+
+### CI/CD Release Workflow
+- Created `.github/workflows/release.yml` triggered on tag releases (`v*`) which builds Oido statically, runs `dumpbin /dependents` to verify zero `vcruntime140.dll` linkage, packages the MSI installer, performs a silent install/uninstall smoke-test on `windows-latest`, and publishes installer artifacts to GitHub Releases.
+
 ## Fase 1 - MVP dicta+pega (en curso)
 
 **Fecha:** 2026-07-09

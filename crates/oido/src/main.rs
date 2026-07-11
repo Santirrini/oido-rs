@@ -6,6 +6,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(feature = "updater")]
+mod updater;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use oido_config::{Config, ConfigStore, Theme};
@@ -48,6 +51,10 @@ struct Cli {
     /// Muestra el path al archivo de configuración y sale
     #[arg(long)]
     config_path: bool,
+
+    /// Busca y aplica actualizaciones de la aplicación (MSI) y sale
+    #[arg(long)]
+    check_update: bool,
 }
 
 /// Mensajes de control internos para el ciclo de vida del hilo principal.
@@ -79,6 +86,24 @@ enum ControlMessage {
 /// workspace; `oido_models` también la consume).
 fn resolve_models_dir() -> PathBuf {
     oido_config::models_dir()
+}
+
+fn has_no_bin_files(models_dir: &Path) -> bool {
+    if !models_dir.exists() {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir(models_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "bin" {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Resuelve el texto del system prompt que se inyectará a whisper.cpp
@@ -518,6 +543,32 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Manejar flag `--check-update`: buscar actualizaciones y salir
+    if cli.check_update {
+        #[cfg(feature = "updater")]
+        {
+            tracing::info!("Buscando actualizaciones...");
+            match updater::check_and_apply() {
+                Ok(updater::Status::UpToDate) => {
+                    tracing::info!("La aplicación ya está actualizada.");
+                }
+                Ok(updater::Status::DownloadedAndInstalling { version }) => {
+                    tracing::info!("Nueva versión v{} descargada. Iniciando instalador...", version);
+                }
+                Err(e) => {
+                    tracing::error!("Error al buscar o aplicar actualización: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        #[cfg(not(feature = "updater"))]
+        {
+            tracing::error!("El actualizador automático no está disponible en esta compilación.");
+            std::process::exit(1);
+        }
+    }
+
     // Manejar modificación persistente de tema/idioma vía CLI si se solicitaron
     let mut snap = cfg.snapshot();
     let mut changed = false;
@@ -756,7 +807,34 @@ fn main() -> Result<()> {
                             );
                         }
                         MenuAction::CheckUpdates => {
-                            tracing::info!("Buscar actualizaciones placeholder — Fase 5");
+                            #[cfg(feature = "updater")]
+                            {
+                                tracing::info!("Iniciando búsqueda de actualizaciones en background...");
+                                let control_tx_clone = control_tx_for_menu.clone();
+                                let _ = thread::Builder::new()
+                                    .name("oido-updater-bg".into())
+                                    .spawn(move || {
+                                        let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Loading));
+                                        match updater::check_and_apply() {
+                                            Ok(updater::Status::UpToDate) => {
+                                                tracing::info!("La aplicación ya está actualizada.");
+                                                let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Idle));
+                                            }
+                                            Ok(updater::Status::DownloadedAndInstalling { version }) => {
+                                                tracing::info!("Nueva versión v{} descargada e instalando en background.", version);
+                                                let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Idle));
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Error buscando/aplicando actualizaciones en background: {:?}", e);
+                                                let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Error));
+                                            }
+                                        }
+                                    });
+                            }
+                            #[cfg(not(feature = "updater"))]
+                            {
+                                tracing::warn!("El actualizador automático no está habilitado en esta build.");
+                            }
                         }
                         MenuAction::TogglePause => {
                             tracing::info!("Pausa/Reanudar placeholder — Fase 2");
@@ -785,7 +863,8 @@ fn main() -> Result<()> {
                                mode: oido_config::SttMode,
                                tr_opt: &Option<Arc<dyn Transcriber>>,
                                st_opt: &Option<oido_stt::LocalAgreementStreamer>,
-                               shared_opt: &Option<Arc<SharedTranscriber>>|
+                               shared_opt: &Option<Arc<SharedTranscriber>>,
+                               is_downloading: bool|
           -> Result<(ActivePipeline, JoinHandle<()>)> {
         let capture = Box::new(CpalCapture::new().context("init captura audio")?);
         // `GatedHotkey` envuelve el `RdevHotkey` y suprime los callbacks
@@ -876,6 +955,11 @@ fn main() -> Result<()> {
         thread::Builder::new()
             .name("oido-lazy-loader".into())
             .spawn(move || {
+                if is_downloading {
+                    // Si ya se está descargando el modelo en background, dejamos que el
+                    // descargador lo active y cambie el estado al terminar.
+                    return;
+                }
                 // Notificamos al bin que estamos cargando.
                 let _ = control_tx_for_lazy.send(ControlMessage::SetTrayState(TrayState::Loading));
 
@@ -981,6 +1065,48 @@ fn main() -> Result<()> {
         Ok((active_pipe, obs))
     };
 
+    let mut is_downloading_at_startup = false;
+    let model_missing = !models_dir.join(&snap.model).exists();
+    let has_no_bins = has_no_bin_files(&models_dir);
+
+    #[cfg(target_os = "windows")]
+    {
+        if (has_no_bins || model_missing) && oido_platform::show_model_prompt_windows() {
+            is_downloading_at_startup = true;
+            let entry = oido_models::find("ggml-base.bin").cloned();
+            if let Some(entry) = entry {
+                let tx = control_tx.clone();
+                let dir = models_dir.clone();
+                let shared_for_dl = shared_transcriber.as_ref().map(Arc::clone);
+                let cfg_for_dl = Arc::clone(&cfg);
+                let span = tracing::info_span!("download_model_startup", filename = "ggml-base.bin");
+                let _ = thread::Builder::new()
+                    .name("oido-downloader".into())
+                    .spawn(move || {
+                        let _enter = span.enter();
+                        tracing::info!("Descargando ggml-base.bin desde el inicio...");
+                        match oido_models::download_model(&dir, &entry, None) {
+                            Ok(()) => {
+                                tracing::info!("descarga de inicio completa");
+                                let _ = tx.send(ControlMessage::RefreshMenu);
+                                activate_after_download(
+                                    &entry.filename,
+                                    &dir,
+                                    &cfg_for_dl,
+                                    shared_for_dl.as_ref(),
+                                    &tx,
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(?e, "descarga de inicio falló");
+                                let _ = tx.send(ControlMessage::SetTrayState(TrayState::Error));
+                            }
+                        }
+                    });
+            }
+        }
+    }
+
     // Arranque inicial
     match start_pipeline(
         &current_binding,
@@ -988,6 +1114,7 @@ fn main() -> Result<()> {
         &transcriber,
         &streamer,
         &shared_transcriber,
+        is_downloading_at_startup,
     ) {
         Ok((pipe, obs)) => {
             pipeline_opt = Some(pipe);
@@ -998,7 +1125,14 @@ fn main() -> Result<()> {
             );
             if let Some(ref mut t) = tray {
                 let theme = cfg.snapshot().theme;
-                let _ = t.set_state(TrayState::Idle, theme);
+                let initial_state = if is_downloading_at_startup {
+                    TrayState::Loading
+                } else if model_missing || has_no_bins {
+                    TrayState::Error
+                } else {
+                    TrayState::Idle
+                };
+                let _ = t.set_state(initial_state, theme);
             }
         }
         Err(e) => {
@@ -1092,6 +1226,7 @@ fn main() -> Result<()> {
                         &transcriber,
                         &streamer,
                         &shared_transcriber,
+                        false,
                     ) {
                         Ok((pipe, obs)) => {
                             pipeline_opt = Some(pipe);
@@ -1198,6 +1333,7 @@ fn main() -> Result<()> {
                             &transcriber,
                             &streamer,
                             &shared_transcriber,
+                            false,
                         ) {
                             Ok((pipe, obs)) => {
                                 pipeline_opt = Some(pipe);
