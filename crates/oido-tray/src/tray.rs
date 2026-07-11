@@ -170,6 +170,16 @@ impl Tray for LinuxTray {
     fn take_menu_events(&mut self) -> Option<crossbeam_channel::Receiver<MenuAction>> {
         self.receiver.take()
     }
+    fn rebuild_menu(&mut self, _sections: Vec<Box<dyn MenuSection>>) -> Result<(), TrayError> {
+        // LinuxTray es un stub: sólo loguea el state. Persistir las
+        // secciones en `self.sections` sería suficiente para que el
+        // shape del struct quede coherente con Win/macOS, pero hoy
+        // ksni 0.x no expone un API de "replace menu" estable para
+        // mantener el contrato de no-OOM en cualquier D-Bus daemon.
+        // Por eso, no-op + log.
+        tracing::info!("tray Linux (ksni): rebuild_menu no-op (stub)");
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,13 +260,11 @@ impl Tray for MacTray {
     }
     fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), TrayError> {
         let (menu, new_id_map) = build_menu_from_sections(&sections);
-        // En tray-icon 0.24, `set_menu` retorna `Result` solo en macOS;
-        // en Windows no. Como aquí estamos en la rama macOS, propagamos
-        // el error tal cual. (Windows tiene su propia rama cfg dentro de
-        // su impl homólogo para absorber la diferencia.)
-        if let Err(e) = self.icon.set_menu(Some(Box::new(menu))) {
-            return Err(TrayError::Tray(format!("set_menu: {e}")));
-        }
+        // En tray-icon 0.24 `set_menu` retorna `()` en ambas
+        // plataformas (Win y macOS). El comentario en el impl de
+        // WindowsTray decía lo contrario; esa rama cfg era defensiva
+        // contra una API que ya no aplica.
+        self.icon.set_menu(Some(Box::new(menu)));
         // Reemplaza el id_map atómicamente; el forwarder leerá la
         // versión nueva a partir del próximo evento.
         let replacement = Arc::try_unwrap(new_id_map)
@@ -341,19 +349,10 @@ impl Tray for WindowsTray {
     }
     fn rebuild_menu(&mut self, sections: Vec<Box<dyn MenuSection>>) -> Result<(), TrayError> {
         let (menu, new_id_map) = build_menu_from_sections(&sections);
-        // Sustituye el menú nativo adjunto al icono. En tray-icon 0.24
-        // `set_menu` no retorna Result en Windows; en macOS sí. Manejamos
-        // ambas variantes vía una sola rama condicional.
-        #[cfg(target_os = "macos")]
-        {
-            if let Err(e) = self.icon.set_menu(Some(Box::new(menu))) {
-                return Err(TrayError::Tray(format!("set_menu: {e}")));
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.icon.set_menu(Some(Box::new(menu)));
-        }
+        // En tray-icon 0.24 `set_menu` retorna `()` tanto en Windows
+        // como en macOS. (La rama cfg anterior era defensiva contra
+        // una API que ya no aplica; ver también `MacTray::rebuild_menu`.)
+        self.icon.set_menu(Some(Box::new(menu)));
         // Reemplaza el id_map atómicamente; el forwarder leerá la
         // versión nueva a partir del próximo evento.
         let replacement = Arc::try_unwrap(new_id_map)

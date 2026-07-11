@@ -17,15 +17,15 @@ must_use_candidate = "allow"
 [dependencies]
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 oido-config = { path = "../oido-config", version = "0.1.0" }
 oido-models = { path = "../oido-models", version = "0.1.0" }
 dark-light.workspace = true
-muda = { workspace = true }
 tray-icon = { workspace = true }
-ksni = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -36,9 +36,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_LibraryLoader",
     "Win32_Foundation",
 ] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ksni = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

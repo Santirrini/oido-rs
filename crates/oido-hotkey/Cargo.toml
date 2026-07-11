@@ -15,6 +15,5 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-oido-config = { path = "../oido-config", version = "0.1.0" }
 global-hotkey.workspace = true
 rdev = { workspace = true, features = ["unstable_grab"] }

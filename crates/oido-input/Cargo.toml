@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
-tracing.workspace = true
 parking_lot.workspace = true
 arboard.workspace = true
 enigo.workspace = true

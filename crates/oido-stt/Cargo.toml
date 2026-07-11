@@ -19,7 +19,6 @@ vulkan = ["whisper-rs/vulkan"]
 audio-smoke = []
 
 [dependencies]
-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
