@@ -43,7 +43,21 @@ jobs:
       - name: Add WiX to PATH
         shell: powershell
         run: |
-          echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (Test-Path env:WIX) {
+              $wixBin = Join-Path $env:WIX "bin"
+              Write-Host "Adding WIX from env:WIX: $wixBin"
+              echo $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+              $wixPath = Resolve-Path "C:\Program Files (x86)\WiX Toolset *" -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($wixPath) {
+                  $binPath = Join-Path $wixPath.Path "bin"
+                  Write-Host "Adding WIX found path: $binPath"
+                  echo $binPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              } else {
+                  Write-Host "Falling back to default WiX path"
+                  echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              }
+          }
 
       - name: Run build-msi.ps1
         shell: powershell
