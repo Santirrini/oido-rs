@@ -576,10 +576,30 @@ fn main() -> Result<()> {
                             ),
                         }
                     } else {
-                        tracing::error!("lazy load Batch: shared_transcriber no disponible");
-                        let _ = control_tx_for_lazy
-                            .send(ControlMessage::SetTrayState(TrayState::Error));
-                        return;
+                        // `shared_for_lazy == None` ocurre en dos casos:
+                        //
+                        // 1. **Modo source = Streaming en el startup**. En
+                        //    este branch solo se construyó el
+                        //    `LocalAgreementStreamer` y `shared_transcriber`
+                        //    quedó `None`. Pero ahora `mode == Batch/Chunked`,
+                        //    lo cual es incongruente con el startup: solo
+                        //    posible si el handler `SetSttMode` ya
+                        //    reemplazó `transcriber` con un WhisperCpp
+                        //    eager-cargado (ver líneas ~880-900). En ese
+                        //    path el modelo **ya está en memoria**, no hay
+                        //    nada que hacer aquí.
+                        //
+                        // 2. **Defensivo**: cualquier otro edge-case donde
+                        //    el `SharedTranscriber` no esté disponible. Lo
+                        //    tratamos como un "skip" informativo (no error)
+                        //    para no abortar el binario si el modelo ya
+                        //    está cargado por otra vía. Si realmente NO
+                        //    hay modelo cargado, el primer press fallará
+                        //    en el pipeline y se diagnosticará allí.
+                        tracing::info!(
+                            "lazy load no requerido: modelo whisper presumiblemente ya \
+                             cargado por otra vía (cambio de modo eager). Abriendo hotkey."
+                        );
                     }
                     Ok(())
                 } else {
@@ -841,7 +861,7 @@ fn main() -> Result<()> {
                 ControlMessage::SetTheme(theme) => {
                     let mut snap = cfg.snapshot();
                     snap.theme = theme;
-                    cfg.replace(snap);
+                    cfg.replace(snap.clone());
                     if let Err(e) = cfg.save() {
                         tracing::error!(?e, "no se pudo guardar la configuración");
                     } else {
@@ -851,6 +871,26 @@ fn main() -> Result<()> {
                     oido_tray::set_windows_menu_theme(theme);
                     if let Some(ref mut t) = tray {
                         let _ = t.set_state(current_tray_state, theme);
+                        // Reconstruir el árbol del menú para refrescar
+                        // la marca ✓ del tema activo. Sin esta llamada,
+                        // el ✓ del tema anterior permanece visible
+                        // aunque la config ya esté actualizada.
+                        let ctx = BuildContext {
+                            models_dir: resolve_models_dir(),
+                            active_model: snap.model.clone(),
+                            ui_language: snap.ui_language,
+                            theme: snap.theme,
+                            stt_mode: snap.stt_mode,
+                            prompt_preset: snap.prompt_preset,
+                            prompt_custom_text: snap.system_prompt.clone(),
+                        };
+                        let sections = default_sections(&ctx);
+                        if let Err(e) = t.rebuild_menu(sections) {
+                            tracing::error!(
+                                ?e,
+                                "no se pudo reconstruir el menú tras cambio de tema"
+                            );
+                        }
                     }
                 }
                 ControlMessage::SetSttMode(mode) => {
@@ -941,6 +981,28 @@ fn main() -> Result<()> {
                                 if let Some(ref mut t) = tray {
                                     let theme = snap.theme;
                                     let _ = t.set_state(TrayState::Idle, theme);
+                                    // Reconstruir el árbol del menú para
+                                    // refrescar la marca ✓ del modo activo.
+                                    // Sin esta llamada, el menú conserva
+                                    // el ✓ del modo anterior aunque la
+                                    // config ya esté actualizada y el
+                                    // pipeline corra en el nuevo modo.
+                                    let ctx = BuildContext {
+                                        models_dir: resolve_models_dir(),
+                                        active_model: snap.model.clone(),
+                                        ui_language: snap.ui_language,
+                                        theme: snap.theme,
+                                        stt_mode: snap.stt_mode,
+                                        prompt_preset: snap.prompt_preset,
+                                        prompt_custom_text: snap.system_prompt.clone(),
+                                    };
+                                    let sections = default_sections(&ctx);
+                                    if let Err(e) = t.rebuild_menu(sections) {
+                                        tracing::error!(
+                                            ?e,
+                                            "no se pudo reconstruir el menú tras cambio de modo de dictado"
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
