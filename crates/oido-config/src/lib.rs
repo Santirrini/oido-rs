@@ -27,12 +27,20 @@ fn default_theme() -> Theme {
     Theme::System
 }
 
-/// Modo de transcripción de audio (Batch o Streaming).
+/// Modo de transcripción de audio (Batch, Streaming o Chunked).
+///
+/// - `Batch`: hold-to-talk clásico. Se graba toda la sesión y se
+///   transcribe de una sola vez al soltar la tecla.
+/// - `Streaming`: transcripción incremental cada 1s con LocalAgreement-2.
+/// - `Chunked`: fragmenta audios largos en bloques de ~5s, transcribe
+///   cada bloque al vuelo y pega incrementalmente. Usa timestamps por
+///   palabra de whisper para cortar entre palabras sin truncar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SttMode {
     Batch,
     Streaming,
+    Chunked,
 }
 
 fn default_stt_mode() -> SttMode {
@@ -276,7 +284,11 @@ mod tests {
                 any::<bool>(),
                 proptest::option::of(1u16..=16),
                 proptest::sample::select(vec![Theme::Dark, Theme::Light, Theme::System]),
-                proptest::sample::select(vec![SttMode::Batch, SttMode::Streaming]),
+                proptest::sample::select(vec![
+                    SttMode::Batch,
+                    SttMode::Streaming,
+                    SttMode::Chunked,
+                ]),
                 proptest::sample::select(vec![
                     UiLanguage::Es,
                     UiLanguage::En,

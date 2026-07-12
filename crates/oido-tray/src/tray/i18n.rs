@@ -49,6 +49,7 @@ pub struct Strings {
     pub mode: &'static str,
     pub mode_batch: &'static str,
     pub mode_streaming: &'static str,
+    pub mode_chunked: &'static str,
 
     // Submenú "Modelos"
     pub models: &'static str,
@@ -101,6 +102,7 @@ pub static STRINGS_ES: Strings = Strings {
     mode: "Modo de dictado",
     mode_batch: "Batch (Hold-to-Talk)",
     mode_streaming: "Streaming (En vivo)",
+    mode_chunked: "Chunked (Por bloques)",
 
     models: "Modelos",
     model_tiny: "Tiny",
@@ -140,6 +142,7 @@ pub static STRINGS_EN: Strings = Strings {
     mode: "Dictation mode",
     mode_batch: "Batch (Hold-to-Talk)",
     mode_streaming: "Streaming (Live)",
+    mode_chunked: "Chunked (Blocks)",
 
     models: "Models",
     model_tiny: "Tiny",
@@ -183,6 +186,7 @@ pub static STRINGS_BILINGUAL: Strings = Strings {
     mode: "Modo de dictado / Dictation mode",
     mode_batch: "Batch (Hold-to-Talk)",
     mode_streaming: "Streaming (En vivo / Live)",
+    mode_chunked: "Chunked (Por bloques / Blocks)",
 
     models: "Modelos / Models",
     model_tiny: "Tiny",
@@ -271,6 +275,7 @@ mod tests {
                 ("mode", t.mode),
                 ("mode_batch", t.mode_batch),
                 ("mode_streaming", t.mode_streaming),
+                ("mode_chunked", t.mode_chunked),
                 ("models", t.models),
                 ("model_tiny", t.model_tiny),
                 ("model_base", t.model_base),

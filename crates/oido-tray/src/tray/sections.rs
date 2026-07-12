@@ -168,7 +168,7 @@ impl MenuSection for ThemeSection {
     }
 }
 
-/// Sección "Modo de dictado" — submenú con Batch / Streaming.
+/// Sección "Modo de dictado" — submenú con Batch / Streaming / Chunked.
 #[derive(Debug)]
 pub struct ModeSection {
     pub ui_language: UiLanguage,
@@ -199,6 +199,15 @@ impl MenuSection for ModeSection {
                         "{}{}",
                         check_or_blank(self.current == SttMode::Streaming),
                         s.mode_streaming
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "mode_chunked".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == SttMode::Chunked),
+                        s.mode_chunked
                     ),
                     enabled: true,
                 },
@@ -575,6 +584,7 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
         "theme_system" => MenuAction::SetTheme(Theme::System),
         "mode_batch" => MenuAction::SetSttMode(SttMode::Batch),
         "mode_streaming" => MenuAction::SetSttMode(SttMode::Streaming),
+        "mode_chunked" => MenuAction::SetSttMode(SttMode::Chunked),
         "ui_es" => MenuAction::SetUiLanguage(UiLanguage::Es),
         "ui_en" => MenuAction::SetUiLanguage(UiLanguage::En),
         "ui_bil" => MenuAction::SetUiLanguage(UiLanguage::Bilingual),
@@ -624,6 +634,10 @@ mod tests {
         assert_eq!(
             id_to_action("mode_streaming"),
             Some(MenuAction::SetSttMode(SttMode::Streaming))
+        );
+        assert_eq!(
+            id_to_action("mode_chunked"),
+            Some(MenuAction::SetSttMode(SttMode::Chunked))
         );
         // i18n
         assert_eq!(
@@ -940,6 +954,7 @@ mod tests {
             "theme_system",
             "mode_batch",
             "mode_streaming",
+            "mode_chunked",
             "ui_es",
             "ui_en",
             "ui_bil",
