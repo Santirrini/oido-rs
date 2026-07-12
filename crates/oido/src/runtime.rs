@@ -1,6 +1,6 @@
-//! Runtime del pipeline: wrapper de las dos variantes (Batch/Streaming).
-//! Encapsula `Pipeline` y `StreamingPipeline` para que el bin las use
-//! sin saber cuál está activa.
+//! Runtime del pipeline: wrapper de las tres variantes (Batch/Streaming/Chunked).
+//! Encapsula `Pipeline`, `StreamingPipeline` y `ChunkedPipeline` para que
+//! el bin las use sin saber cuál está activa.
 
 use oido_core::{Pipeline, PipelineEvent};
 
@@ -8,6 +8,7 @@ use oido_core::{Pipeline, PipelineEvent};
 pub(crate) enum ActivePipeline {
     Batch(Pipeline),
     Streaming(oido_core::StreamingPipeline),
+    Chunked(oido_core::ChunkedPipeline),
 }
 
 impl ActivePipeline {
@@ -15,6 +16,7 @@ impl ActivePipeline {
         match self {
             ActivePipeline::Batch(p) => p.events(),
             ActivePipeline::Streaming(p) => p.events(),
+            ActivePipeline::Chunked(p) => p.events(),
         }
     }
 
@@ -22,6 +24,7 @@ impl ActivePipeline {
         match self {
             ActivePipeline::Batch(p) => p.start(),
             ActivePipeline::Streaming(p) => p.start(),
+            ActivePipeline::Chunked(p) => p.start(),
         }
     }
 
@@ -29,6 +32,7 @@ impl ActivePipeline {
         match self {
             ActivePipeline::Batch(p) => p.shutdown(),
             ActivePipeline::Streaming(p) => p.shutdown(),
+            ActivePipeline::Chunked(p) => p.shutdown(),
         }
     }
 }

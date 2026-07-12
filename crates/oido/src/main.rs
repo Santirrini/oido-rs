@@ -267,7 +267,7 @@ fn main() -> Result<()> {
     let mut shared_transcriber: Option<Arc<SharedTranscriber>> = None;
     let mut streamer: Option<oido_stt::LocalAgreementStreamer> = None;
 
-    if stt_mode == oido_config::SttMode::Batch {
+    if stt_mode == oido_config::SttMode::Batch || stt_mode == oido_config::SttMode::Chunked {
         // System prompt resuelto una sola vez al startup; si cambia
         // en runtime via menú/CLI, se propaga via `set_initial_prompt`
         // sobre el `SharedTranscriber` (no requiere recargar el modelo).
@@ -434,30 +434,50 @@ fn main() -> Result<()> {
         let hotkey: Box<dyn Hotkey> = Box::new(gated);
         let injector = ArboardInjector::new().context("init injector clipboard")?;
 
-        let mut active_pipe = if mode == oido_config::SttMode::Batch {
-            let tr = tr_opt
-                .clone()
-                .context("transcriber no cargado en modo batch")?;
-            let pipeline_cfg = PipelineConfig {
-                capture,
-                transcriber: tr,
-                injector,
-                hotkey,
-                hotkey_binding: binding_str.to_string(),
-            };
-            ActivePipeline::Batch(Pipeline::new(pipeline_cfg))
-        } else {
-            let st = st_opt
-                .clone()
-                .context("streamer no cargado en modo streaming")?;
-            let pipeline_cfg = oido_core::StreamingPipelineConfig {
-                capture,
-                streamer: Box::new(st),
-                injector,
-                hotkey,
-                hotkey_binding: binding_str.to_string(),
-            };
-            ActivePipeline::Streaming(oido_core::StreamingPipeline::new(pipeline_cfg))
+        let mut active_pipe = match mode {
+            oido_config::SttMode::Batch => {
+                let tr = tr_opt
+                    .clone()
+                    .context("transcriber no cargado en modo batch")?;
+                let pipeline_cfg = PipelineConfig {
+                    capture,
+                    transcriber: tr,
+                    injector,
+                    hotkey,
+                    hotkey_binding: binding_str.to_string(),
+                };
+                ActivePipeline::Batch(Pipeline::new(pipeline_cfg))
+            }
+            oido_config::SttMode::Streaming => {
+                let st = st_opt
+                    .clone()
+                    .context("streamer no cargado en modo streaming")?;
+                let pipeline_cfg = oido_core::StreamingPipelineConfig {
+                    capture,
+                    streamer: Box::new(st),
+                    injector,
+                    hotkey,
+                    hotkey_binding: binding_str.to_string(),
+                };
+                ActivePipeline::Streaming(oido_core::StreamingPipeline::new(pipeline_cfg))
+            }
+            oido_config::SttMode::Chunked => {
+                // Chunked reusa el mismo backend WhisperCpp que Batch
+                // (transcribe_timed vive en el mismo struct). Requiere
+                // `chunk_duration_secs`; 5.0s es el default recomendado.
+                let tr = tr_opt
+                    .clone()
+                    .context("transcriber no cargado en modo chunked")?;
+                let pipeline_cfg = oido_core::ChunkedPipelineConfig {
+                    capture,
+                    transcriber: tr,
+                    injector,
+                    hotkey,
+                    hotkey_binding: binding_str.to_string(),
+                    chunk_duration_secs: 5.0,
+                };
+                ActivePipeline::Chunked(oido_core::ChunkedPipeline::new(pipeline_cfg))
+            }
         };
 
         let events = active_pipe.events();
@@ -513,7 +533,9 @@ fn main() -> Result<()> {
                 let _ = control_tx_for_lazy.send(ControlMessage::SetTrayState(TrayState::Loading));
 
                 let t = Instant::now();
-                let load_result: anyhow::Result<()> = if mode == oido_config::SttMode::Batch {
+                let load_result: anyhow::Result<()> = if mode == oido_config::SttMode::Batch
+                    || mode == oido_config::SttMode::Chunked
+                {
                     if let Some(shared) = shared_for_lazy.as_ref() {
                         let handle = shared.handle();
                         {
@@ -584,7 +606,10 @@ fn main() -> Result<()> {
                 // ahora (off del main thread). Esto no bloquea
                 // `startup_total`. Si falla, el STT sigue sin VAD
                 // (el STT ya se construyó sin vad_path al inicio).
-                if !did_vad_exist_at_startup && mode == oido_config::SttMode::Batch {
+                if !did_vad_exist_at_startup
+                    && (mode == oido_config::SttMode::Batch
+                        || mode == oido_config::SttMode::Chunked)
+                {
                     let t_vad_dl = Instant::now();
                     let vad_downloaded = download_vad_model_blocking(&models_dir_for_lazy);
                     tracing::info!(
@@ -847,11 +872,17 @@ fn main() -> Result<()> {
                             let _ = obs.join();
                         }
 
-                        // 2) Liberar backend inactivo y cargar el nuevo
-                        if mode == oido_config::SttMode::Batch {
+                        // 2) Liberar backend inactivo y cargar el nuevo.
+                        // Batch y Chunked comparten el mismo backend
+                        // (WhisperCpp + SharedTranscriber); solo difieren
+                        // en el pipeline que los consume. Streaming usa
+                        // LocalAgreementStreamer.
+                        if mode == oido_config::SttMode::Batch
+                            || mode == oido_config::SttMode::Chunked
+                        {
                             streamer = None; // Liberar memoria de streaming
                             if transcriber.is_none() {
-                                tracing::info!("Cargando modelo whisper en modo Batch...");
+                                tracing::info!("Cargando modelo whisper en modo {:?}...", mode);
                                 let prompt = resolve_prompt_text(&snap);
                                 let mut stt_builder = WhisperCpp::with_language(&snap.language_ui)
                                     .with_initial_prompt(&prompt)
@@ -861,7 +892,11 @@ fn main() -> Result<()> {
                                 }
                                 let mut stt = stt_builder;
                                 if let Err(e) = stt.load_model(&model_path) {
-                                    tracing::warn!(?e, "no se pudo cargar el modelo en modo Batch");
+                                    tracing::warn!(
+                                        ?e,
+                                        "no se pudo cargar el modelo en modo {:?}",
+                                        mode
+                                    );
                                 } else {
                                     let _ = stt.warm_up();
                                     transcriber = Some(Arc::new(stt));
