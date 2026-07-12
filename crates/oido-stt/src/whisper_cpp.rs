@@ -292,6 +292,39 @@ pub(crate) fn build_streaming_params<'a>(
     params
 }
 
+/// Parameters tuned for "Chunked" mode: idéntico a `build_base_params`
+/// salvo que activa `token_timestamps(true)`, necesario para que
+/// `WhisperCpp::transcribe_timed` pueda leer los `t0`/`t1` de cada token
+/// y localizar el límite de palabra más cercano al corte. El overhead de
+/// activar timestamps es ~5-10% sobre la inferencia base (una sola
+/// pasada, sin retranscripción).
+pub(crate) fn build_chunked_params<'a>(
+    language: Option<&'a str>,
+    system_prompt: Option<&'a str>,
+    n_threads: u16,
+) -> FullParams<'a, 'a> {
+    // Partimos del builder base (greedy, anti-alucinación, single_segment)
+    // y solo flipamos el flag de timestamps por token.
+    let mut params = build_base_params(language, system_prompt, n_threads);
+    params.set_token_timestamps(true);
+    params
+}
+
+/// Convierte un timestamp de whisper (centiseconds, 10 ms c/u) a índice
+/// de muestra en audio PCM mono 16 kHz.
+///
+/// 1 centisecond = 10 ms = 160 muestras @ 16 kHz.
+///
+/// Defensiva frente a timestamps negativos (no deberían ocurrir, pero
+/// `i64 as usize` haría wrap-around en lugar de saturar): cualquier valor
+/// negativo se mapea a 0.
+fn centiseconds_to_samples(cs: i64) -> usize {
+    if cs <= 0 {
+        return 0;
+    }
+    (cs as usize).saturating_mul(160)
+}
+
 impl Transcriber for WhisperCpp {
     fn transcribe(&self, audio: &[f32]) -> Result<String, SttError> {
         // whisper.cpp requiere un mínimo de audio (ej. 300 ms = 4800 muestras @ 16kHz) para
@@ -386,6 +419,145 @@ impl Transcriber for WhisperCpp {
             out.push_str(trimmed);
         }
         Ok(out)
+    }
+
+    fn transcribe_timed(
+        &self,
+        audio: &[f32],
+        max_samples: usize,
+    ) -> Result<super::WordTimings, SttError> {
+        if audio.len() < 4_800 {
+            return Err(SttError::AudioTooShort(audio.len()));
+        }
+        let ctx = self.ctx.as_ref().ok_or_else(|| {
+            SttError::ModelNotFound(PathBuf::from("<WhisperCpp: modelo no cargado>"))
+        })?;
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| SttError::Backend(format!("create_state: {e}")))?;
+
+        // Mismo builder que batch pero con `set_token_timestamps(true)` para
+        // que cada token traiga sus `t0`/`t1`. El overhead es ~5-10%.
+        let mut params = build_chunked_params(
+            self.language.as_deref(),
+            self.system_prompt.as_deref(),
+            self.n_threads,
+        );
+
+        let audio_secs = audio.len() as f32 / 16_000.0;
+        let ctx_frames = (((audio_secs + 2.0) * 50.0) as i32).clamp(100, 1500);
+        params.set_audio_ctx(ctx_frames);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
+        params.set_no_speech_thold(0.6);
+
+        // VAD nativo (mismo bloque que `transcribe`).
+        if let Some(vad_path) = &self.vad_model_path {
+            let vad_path_str = vad_path.to_str().ok_or_else(|| {
+                SttError::Backend(format!("VAD path no UTF-8: {}", vad_path.display()))
+            })?;
+            params.set_vad_model_path(Some(vad_path_str));
+            let mut vad_params = WhisperVadParams::new();
+            vad_params.set_threshold(0.5);
+            vad_params.set_min_speech_duration(250);
+            vad_params.set_min_silence_duration(500);
+            vad_params.set_speech_pad(30);
+            params.set_vad_params(vad_params);
+            params.enable_vad(true);
+        }
+
+        state
+            .full(params, audio)
+            .map_err(|e| SttError::Backend(format!("full: {e}")))?;
+
+        // === Localización del corte palabra-completa ===
+        //
+        // Recorremos todos los tokens de todos los segmentos. En whisper,
+        // el texto de un token de inicio de palabra suele venir con un
+        // espacio prefijo (ej. `" hola"`, `" mundo"`). Cuando vemos un
+        // token que inicia palabra nueva, sabemos que el token **anterior**
+        // cerró una palabra: si su `t1` (en samples) cae dentro de
+        // `max_samples`, registramos un "corte candidato" = (texto hasta
+        // aquí, muestra de fin).
+        //
+        // Al final, si el último token de texto también cae dentro de
+        // `max_samples`, todo el audio cabe y no hay carryover.
+        //
+        // Los tokens especiales (timestamp tokens `[...]`, blanks) se
+        // filtran por contenido: su `to_str_lossy()` es vacío o empieza
+        // con `[`; no los contamos como texto ni como límites de palabra.
+        let mut text_buf = String::new();
+        let mut last_text_t1_sample: usize = 0;
+        // Corte candidato (texto + muestra) del último límite de palabra
+        // que cayó dentro de `max_samples`.
+        let mut cut_text_len: usize = 0;
+        let mut cut_sample: usize = 0;
+
+        for i in 0..state.full_n_segments() {
+            let Some(seg) = state.get_segment(i) else {
+                continue;
+            };
+            for j in 0..seg.n_tokens() {
+                let Some(token) = seg.get_token(j) else {
+                    continue;
+                };
+                let Ok(cow) = token.to_str_lossy() else {
+                    continue;
+                };
+                let token_text = cow.as_ref();
+                let trimmed = token_text.trim();
+
+                // Saltar tokens especiales (timestamp tokens, blanks):
+                // su texto es vacío o empieza con `[` (ej. `[_TT_...]`).
+                if trimmed.is_empty() || trimmed.starts_with('[') {
+                    continue;
+                }
+
+                // ¿Este token inicia una palabra nueva?
+                let starts_new_word =
+                    token_text.starts_with(' ') || token_text.starts_with('\u{2581}'); // SentencePiece ▁
+
+                if starts_new_word && !text_buf.is_empty() {
+                    // El token anterior cerró una palabra. Si su fin cae
+                    // dentro del rango, registrar corte candidato.
+                    if last_text_t1_sample <= max_samples {
+                        cut_text_len = text_buf.len();
+                        cut_sample = last_text_t1_sample;
+                    }
+                }
+
+                text_buf.push_str(trimmed);
+                if !text_buf.ends_with(' ') {
+                    text_buf.push(' ');
+                }
+
+                let data = token.token_data();
+                last_text_t1_sample = centiseconds_to_samples(data.t1);
+            }
+        }
+
+        // Caso "todo cabe": el último token de texto termina dentro del
+        // rango. Devolvemos el texto completo sin recorte.
+        if last_text_t1_sample > 0 && last_text_t1_sample <= max_samples {
+            let text = text_buf.trim().to_string();
+            return Ok(super::WordTimings {
+                text,
+                last_word_end_sample: audio.len(),
+            });
+        }
+
+        // Usar el último corte candidato registrado. Si no hubo ninguno
+        // (ninguna palabra completa cae en el rango), el audio entero es
+        // carryover: devolvemos texto vacío + sample 0.
+        let text = if cut_sample == 0 {
+            String::new()
+        } else {
+            text_buf[..cut_text_len].trim().to_string()
+        };
+        Ok(super::WordTimings {
+            text,
+            last_word_end_sample: cut_sample,
+        })
     }
 
     fn load_model(&mut self, model_path: &Path) -> Result<(), SttError> {
@@ -563,5 +735,71 @@ mod tests {
                  recuerda: el objetivo es time-to-ready corto (ver plan)"
             )
         };
+    }
+
+    #[test]
+    fn centiseconds_to_samples_is_correct() {
+        // 1 centisecond = 10 ms = 160 muestras @ 16 kHz.
+        assert_eq!(centiseconds_to_samples(0), 0);
+        assert_eq!(centiseconds_to_samples(1), 160);
+        // 1 segundo = 100 centiseconds = 16.000 muestras.
+        assert_eq!(centiseconds_to_samples(100), 16_000);
+        // 5 segundos = 80.000 muestras (tamaño de chunk por defecto).
+        assert_eq!(centiseconds_to_samples(500), 80_000);
+    }
+
+    #[test]
+    fn centiseconds_to_samples_saturates_on_negative() {
+        // Un timestamp negativo (no debería ocurrir en whisper, pero la
+        // conversión debe ser defensiva) se satura a 0, no paniquea.
+        assert_eq!(centiseconds_to_samples(-5), 0);
+        assert_eq!(centiseconds_to_samples(-1000), 0);
+    }
+
+    /// `transcribe_timed` sin modelo cargado devuelve `ModelNotFound`,
+    /// igual que `transcribe`. Verifica que el guard de validación temprana
+    /// está replicado en el nuevo método.
+    #[test]
+    fn transcribe_timed_without_model_returns_not_found() {
+        let stt = WhisperCpp::default();
+        let audio = vec![0.0_f32; 16_000];
+        match stt.transcribe_timed(&audio, 16_000) {
+            Err(SttError::ModelNotFound(_)) => (),
+            other => panic!("esperaba ModelNotFound, obtuve: {:?}", other),
+        }
+    }
+
+    /// `transcribe_timed` con audio muy corto devuelve `AudioTooShort`
+    /// antes de tocar el modelo. La validación de largo se ejecuta primero.
+    #[test]
+    fn transcribe_timed_short_audio_returns_too_short() {
+        let stt = WhisperCpp::default();
+        let audio = vec![0.0_f32; 800];
+        let res = stt.transcribe_timed(&audio, 800);
+        assert!(matches!(res, Err(SttError::AudioTooShort(800))));
+    }
+
+    /// Smoke test E2E con timestamps: requiere `models/ggml-base.bin`.
+    /// Verifica que `transcribe_timed` con `max_samples >= audio.len()`
+    /// devuelve TODO el texto (caso "todo cabe") y `last_word_end_sample
+    /// == audio.len()`.
+    #[test]
+    #[ignore = "requiere models/ggml-base.bin presente en disco"]
+    fn smoke_transcribe_timed_fits_all() {
+        let model = std::path::PathBuf::from("models/ggml-base.bin");
+        let mut stt = WhisperCpp::with_language("es");
+        stt.load_model(&model).expect("cargar modelo");
+        let audio: Vec<f32> = (0..16_000)
+            .map(|i| (i as f32 * 0.001).sin() * 0.1)
+            .collect();
+        // max_samples = audio.len() → todo debe caber.
+        let result = stt
+            .transcribe_timed(&audio, audio.len())
+            .expect("transcribe_timed");
+        assert_eq!(
+            result.last_word_end_sample,
+            audio.len(),
+            "si todo cabe, last_word_end_sample == audio.len()"
+        );
     }
 }

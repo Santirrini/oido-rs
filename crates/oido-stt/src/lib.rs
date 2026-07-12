@@ -29,12 +29,49 @@ pub enum SttError {
     Backend(String),
 }
 
+/// Resultado de una transcripción con información de timestamps por
+/// palabra, para el modo "Chunked".
+///
+/// `last_word_end_sample` indica el índice de muestra (dentro del slice
+/// de audio de entrada) donde termina la última palabra COMPLETA cuyo
+/// fin cae dentro de `max_samples`. El audio posterior a ese índice es
+/// "carryover" y debe prepenerse al siguiente bloque para no truncar la
+/// palabra cortada a medias.
+///
+/// Si toda la transcripción cabe dentro de `max_samples`, entonces
+/// `last_word_end_sample == audio.len()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordTimings {
+    /// Texto transcrito hasta el corte (palabra completa más cercana a
+    /// `max_samples`).
+    pub text: String,
+    /// Índice de muestra donde termina la última palabra completa.
+    pub last_word_end_sample: usize,
+}
+
 /// Backend STT. Tómalo por referencia; los backends deben ser
 /// internamente `Sync` (whisper.cpp lo es).
 pub trait Transcriber: Send + Sync + std::fmt::Debug {
     /// Transcribe un bloque de audio PCM mono 16 kHz f32. El bloque debe
     /// tener al menos ~0.3 s para que el VAD interno detecte algo.
     fn transcribe(&self, audio: &[f32]) -> Result<String, SttError>;
+
+    /// Transcribe un bloque y devuelve información de corte palabra-
+    /// completa. El backend busca el límite de palabra más cercano a
+    /// `max_samples` (medido en muestras del audio de entrada) y
+    /// devuelve el texto hasta ese punto + el índice de muestra donde
+    /// termina la palabra.
+    ///
+    /// Default: transcribe todo y devuelve `last_word_end_sample =
+    /// audio.len()`. Los backends con timestamps por token (whisper.cpp)
+    /// lo implementan para soportar el modo "Chunked".
+    fn transcribe_timed(&self, audio: &[f32], max_samples: usize) -> Result<WordTimings, SttError> {
+        let text = self.transcribe(audio)?;
+        Ok(WordTimings {
+            text,
+            last_word_end_sample: audio.len().min(max_samples),
+        })
+    }
 
     /// Carga un modelo desde disco. Es la única operación que requiere
     /// `&mut self`.
@@ -118,6 +155,10 @@ impl Debug for SharedTranscriber {
 impl Transcriber for SharedTranscriber {
     fn transcribe(&self, audio: &[f32]) -> Result<String, SttError> {
         self.inner.lock().transcribe(audio)
+    }
+
+    fn transcribe_timed(&self, audio: &[f32], max_samples: usize) -> Result<WordTimings, SttError> {
+        self.inner.lock().transcribe_timed(audio, max_samples)
     }
 
     fn load_model(&mut self, model_path: &Path) -> Result<(), SttError> {
