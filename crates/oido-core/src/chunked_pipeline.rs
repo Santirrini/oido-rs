@@ -253,27 +253,29 @@ impl ChunkedPipeline {
                     // Paso 3: obtener el carryover del bloque anterior.
                     // Si es el primer chunk, no hay carryover.
                     //
-                    // Para chunks subsiguientes, intentamos recibir el
-                    // carryover con un timeout corto. Si el worker no
-                    // responde a tiempo (o ya consumimos el carryover
-                    // anterior), seguimos cortando sin él — esto evita
-                    // el deadlock donde el consumer espera bloqueado un
-                    // carryover que el worker ya envió y que el consumer
-                    // consumió antes.
+                    // Para chunks subsiguientes, esperamos al carryover
+                    // con un timeout de 30 segundos. Por qué 30s:
+                    //  - En CPU con modelo small, un chunk de 5s de audio
+                    //    tarda típicamente 5-8s en transcribirse (más
+                    //    que el audio mismo por overhead del decoder).
+                    //  - 30s es absurdo pero descarta el timeout como
+                    //    causa de duplicación; cubre CPU muy lenta.
+                    //  - El worker usa `send` bloqueante, así que SI hay
+                    //    carryover, llega. Si el timeout expira, significa
+                    //    que el worker descartó el carryover (todo
+                    //    silencio) y NO envió nada — cortar sin
+                    //    carryover es correcto.
                     //
-                    // El trade-off: si no usamos carryover, el primer
-                    // ~200ms del chunk actual pueden solapar con el final
-                    // del anterior. La frase_filter + dedup absorben la
-                    // duplicación trivial; lo importante es NO colgarse.
+                    // Si el timeout expira frecuentemente en producción,
+                    // considerar reducir chunk_duration_secs (chunks más
+                    // cortos = worker más rápido) o usar GPU.
                     if !is_first_chunk && pending_carryover.is_empty() {
-                        match carryover_rx.recv_timeout(Duration::from_millis(50)) {
+                        match carryover_rx.recv_timeout(Duration::from_secs(30)) {
                             Ok(co) => pending_carryover = co,
                             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                                // Worker no respondió a tiempo o el
-                                // carryover ya se consumió. Cortamos sin
-                                // él.
-                                tracing::debug!(
-                                    "carryover no disponible tras 50ms; cortando sin él"
+                                tracing::warn!(
+                                    "carryover no entregado tras 30s; cortando sin él \
+                                     (worker más lento de lo esperado)"
                                 );
                             }
                             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -292,9 +294,15 @@ impl ChunkedPipeline {
                             // buffer entre el paso 2 y aquí.
                             continue;
                         }
+                        let carryover_len = pending_carryover.len();
                         let mut chunk = std::mem::take(&mut pending_carryover);
                         chunk.extend_from_slice(&s.samples[..chunk_size]);
                         s.samples.drain(0..chunk_size);
+                        tracing::debug!(
+                            carryover_len,
+                            chunk_total = chunk.len(),
+                            "corte de chunk"
+                        );
                         chunk
                     };
 
@@ -444,7 +452,12 @@ fn process_chunk(
         );
         let carryover = trim_trailing_silence(&chunk);
         if !carryover.is_empty() {
-            let _ = carryover_tx.try_send(carryover.to_vec());
+            // `send` bloqueante: si el canal está lleno, el consumer
+            // aún no leyó el carryover anterior. Esperamos microsegundos
+            // (bounded 1) — mejor que descartar y re-procesar audio.
+            if let Err(e) = carryover_tx.send(carryover.to_vec()) {
+                tracing::warn!(?e, "no se pudo enviar carryover (shutdown)");
+            }
         }
         let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
         return;
@@ -462,7 +475,9 @@ fn process_chunk(
         // cortada, recortando silencio.
         let carryover = trim_trailing_silence(&chunk[timings.last_word_end_sample..]);
         if !carryover.is_empty() {
-            let _ = carryover_tx.try_send(carryover.to_vec());
+            if let Err(e) = carryover_tx.send(carryover.to_vec()) {
+                tracing::warn!(?e, "no se pudo enviar carryover (shutdown)");
+            }
         }
         let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
         return;
@@ -492,10 +507,18 @@ fn process_chunk(
     // el silencio final para no arrastrar ms inútiles al próximo bloque
     // (el caso típico es "habla + pausa antes de los 5s"). Si todo es
     // silencio, descartamos el carryover entero.
+    //
+    // Usamos `send` bloqueante (no `try_send`) para garantizar que el
+    // consumer recibe el carryover. El canal es `bounded(1)`: si está
+    // lleno, el worker espera microsegundos hasta que el consumer lea.
+    // Esto evita la pérdida silenciosa de carryover que causaba
+    // duplicación de palabras entre chunks.
     let raw_carryover = &chunk[timings.last_word_end_sample..];
     let carryover = trim_trailing_silence(raw_carryover);
     if !carryover.is_empty() {
-        let _ = carryover_tx.try_send(carryover.to_vec());
+        if let Err(e) = carryover_tx.send(carryover.to_vec()) {
+            tracing::warn!(?e, "no se pudo enviar carryover (shutdown)");
+        }
     }
     let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
 }
