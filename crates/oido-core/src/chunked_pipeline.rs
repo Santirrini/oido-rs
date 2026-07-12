@@ -60,7 +60,7 @@
 
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
@@ -251,14 +251,34 @@ impl ChunkedPipeline {
                     }
 
                     // Paso 3: obtener el carryover del bloque anterior.
-                    // Si es el primer chunk, no hay carryover. Si no,
-                    // esperamos a que el worker lo devuelva. Mientras
-                    // esperamos, cpal sigue enviando frames al canal
-                    // (bounded 1024), así que no perdemos audio.
+                    // Si es el primer chunk, no hay carryover.
+                    //
+                    // Para chunks subsiguientes, intentamos recibir el
+                    // carryover con un timeout corto. Si el worker no
+                    // responde a tiempo (o ya consumimos el carryover
+                    // anterior), seguimos cortando sin él — esto evita
+                    // el deadlock donde el consumer espera bloqueado un
+                    // carryover que el worker ya envió y que el consumer
+                    // consumió antes.
+                    //
+                    // El trade-off: si no usamos carryover, el primer
+                    // ~200ms del chunk actual pueden solapar con el final
+                    // del anterior. La frase_filter + dedup absorben la
+                    // duplicación trivial; lo importante es NO colgarse.
                     if !is_first_chunk && pending_carryover.is_empty() {
-                        match carryover_rx.recv() {
+                        match carryover_rx.recv_timeout(Duration::from_millis(50)) {
                             Ok(co) => pending_carryover = co,
-                            Err(_) => break, // shutdown
+                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                                // Worker no respondió a tiempo o el
+                                // carryover ya se consumió. Cortamos sin
+                                // él.
+                                tracing::debug!(
+                                    "carryover no disponible tras 50ms; cortando sin él"
+                                );
+                            }
+                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                break; // shutdown
+                            }
                         }
                     }
 
@@ -416,12 +436,16 @@ fn process_chunk(
     let text = timings.text.trim();
     if text.is_empty() {
         // El chunk completo es carryover (ninguna palabra completa
-        // cayó en el rango). Devolver todo como carryover.
+        // cayó en el rango). Devolver todo como carryover, recortando
+        // silencio final.
         tracing::debug!(
             samples,
             "chunk produjo texto vacío; devolviendo todo como carryover"
         );
-        let _ = carryover_tx.try_send(chunk);
+        let carryover = trim_trailing_silence(&chunk);
+        if !carryover.is_empty() {
+            let _ = carryover_tx.try_send(carryover.to_vec());
+        }
         let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
         return;
     }
@@ -435,8 +459,8 @@ fn process_chunk(
             "chunk descartado por filtro"
         );
         // Aún así devolvemos el carryover para no perder la palabra
-        // cortada.
-        let carryover = &chunk[timings.last_word_end_sample..];
+        // cortada, recortando silencio.
+        let carryover = trim_trailing_silence(&chunk[timings.last_word_end_sample..]);
         if !carryover.is_empty() {
             let _ = carryover_tx.try_send(carryover.to_vec());
         }
@@ -464,10 +488,41 @@ fn process_chunk(
         "chunk transcrito e inyectado"
     );
 
-    // Carryover: audio desde el corte hasta el fin del chunk.
-    let carryover = chunk[timings.last_word_end_sample..].to_vec();
+    // Carryover: audio desde el corte hasta el fin del chunk. Recortamos
+    // el silencio final para no arrastrar ms inútiles al próximo bloque
+    // (el caso típico es "habla + pausa antes de los 5s"). Si todo es
+    // silencio, descartamos el carryover entero.
+    let raw_carryover = &chunk[timings.last_word_end_sample..];
+    let carryover = trim_trailing_silence(raw_carryover);
     if !carryover.is_empty() {
-        let _ = carryover_tx.try_send(carryover);
+        let _ = carryover_tx.try_send(carryover.to_vec());
     }
     let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
+}
+
+/// Recorta el silencio al final de un slice de audio. Define silencio
+/// como muestras con `|x| < 0.01` (amplitud ≈ -40 dBFS). Recorre desde
+/// el final hacia atrás y devuelve el slice sin la cola silenciosa.
+///
+/// Si todo el audio es silencio, devuelve un slice vacío (el llamador
+/// lo descarta). Conserva al menos una ventana de 200ms (3.200
+/// muestras @ 16 kHz) para que el VAD del próximo bloque tenga
+/// "contexto" antes del habla — sin eso, el primer fonema puede
+/// perderse.
+fn trim_trailing_silence(audio: &[f32]) -> &[f32] {
+    const SILENCE_THRESHOLD: f32 = 0.01;
+    const MIN_KEEP_SAMPLES: usize = 3_200; // 200ms
+
+    if audio.len() <= MIN_KEEP_SAMPLES {
+        return audio;
+    }
+    let mut end = audio.len();
+    while end > MIN_KEEP_SAMPLES
+        && audio[end - 1].abs() < SILENCE_THRESHOLD
+        && audio[end - 2].abs() < SILENCE_THRESHOLD
+        && audio[end - 4].abs() < SILENCE_THRESHOLD
+    {
+        end -= 1;
+    }
+    &audio[..end]
 }

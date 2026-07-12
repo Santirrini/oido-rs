@@ -537,8 +537,23 @@ impl Transcriber for WhisperCpp {
         }
 
         // Caso "todo cabe": el último token de texto termina dentro del
-        // rango. Devolvemos el texto completo sin recorte.
-        if last_text_t1_sample > 0 && last_text_t1_sample <= max_samples {
+        // rango **Y** cubre una fracción razonable del audio. Esto último
+        // es crítico: si el texto termina muy temprano (ej. habla +
+        // silencio), NO debemos devolver "todo cabe" porque el audio
+        // posterior a la última palabra es silencio sin información
+        // nueva, y devolver `audio.len()` como corte hace que el
+        // pipeline Chunked crea que no hay carryover y bloquee
+        // esperando uno que nunca llegará.
+        //
+        // Heurística: si el texto cubre >= 50% del audio, devolvemos
+        // todo el texto + sin carryover. Si cubre < 50%, caemos al
+        // caso "corte candidato" para que el siguiente bloque
+        // reprocese el audio desde el final de la última palabra
+        // (saltando el silencio).
+        let coverage_ok = last_text_t1_sample > 0
+            && last_text_t1_sample <= max_samples
+            && (last_text_t1_sample * 2 >= audio.len());
+        if coverage_ok {
             let text = text_buf.trim().to_string();
             return Ok(super::WordTimings {
                 text,
