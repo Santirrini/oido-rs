@@ -310,6 +310,38 @@ pub(crate) fn build_chunked_params<'a>(
     params
 }
 
+/// Añade el texto de un token de whisper a `text_buf` respetando el
+/// marcador de límite de palabra **nativo** del tokenizador, en lugar de
+/// forzar un espacio tras cada token.
+///
+/// El tokenizador de whisper (tiktoken BPE) embebe el límite de palabra
+/// como un espacio prefijo en el texto del token: `" hol"` inicia palabra,
+/// mientras que subwords/continuación (`"a"`, `"ando"`) y puntuación (`","`,
+/// `"."`) llegan **sin** ese espacio. Forzar un espacio tras cada token
+/// (como hacía la versión anterior) destruye esa señal y produce, a partir
+/// de `" hol"`+`"a"`, el texto roto `"hol a"`, o `"Hola ,"` a partir de
+/// `" Hola"`+`","`.
+///
+/// Contrato:
+/// - Tokens de inicio de palabra (`" hola"`) o con marcador SentencePiece
+///   (`▁`, U+2581) → insertan un espacio separador antes (salvo el primer
+///   token del buffer) y se retira el marcador del contenido (el `▁` no es
+///   whitespace ASCII, así que `trim()` por sí solo no lo quita).
+/// - Subwords/continuación y puntuación → se pegan al token anterior sin
+///   separador.
+/// - El caller debe filtrar previamente los tokens especiales
+///   (`[_TT_…]`, blanks): esta función asume texto "real".
+fn append_token_word_aware(text_buf: &mut String, token_text: &str) {
+    let starts_new_word = token_text.starts_with(' ') || token_text.starts_with('\u{2581}'); // SentencePiece ▁
+    if starts_new_word && !text_buf.is_empty() {
+        text_buf.push(' ');
+    }
+    // `trim()` retira el espacio prefijo de whisper; el `▁` (no es
+    // whitespace) hay que quitarlo a mano para que no llegue a la salida.
+    let text = token_text.trim_start_matches('\u{2581}').trim();
+    text_buf.push_str(text);
+}
+
 /// Convierte un timestamp de whisper (centiseconds, 10 ms c/u) a índice
 /// de muestra en audio PCM mono 16 kHz.
 ///
@@ -526,10 +558,12 @@ impl Transcriber for WhisperCpp {
                     }
                 }
 
-                text_buf.push_str(trimmed);
-                if !text_buf.ends_with(' ') {
-                    text_buf.push(' ');
-                }
+                // Reconstrucción por límite de palabra: el marcador de
+                // palabra va embebido en el token (espacio prefijo / ▁),
+                // NO se fuerza un espacio tras cada token. Hacerlo rompe
+                // subwords ("hol a") y adelanta puntuación ("Hola ,").
+                // Ver `append_token_word_aware`.
+                append_token_word_aware(&mut text_buf, token_text);
 
                 let data = token.token_data();
                 last_text_t1_sample = centiseconds_to_samples(data.t1);
@@ -816,5 +850,64 @@ mod tests {
             audio.len(),
             "si todo cabe, last_word_end_sample == audio.len()"
         );
+    }
+
+    // === Tests de append_token_word_aware (reconstrucción por límite de palabra) ===
+    //
+    // Estos tests son deterministas y NO requieren modelo: cubren el 100%
+    // de la lógica de espaciado que `transcribe_timed` usa para reconstruir
+    // el texto a partir de los tokens de whisper. El bug original ("hol a",
+    // "prob ando", "Hola ,") se reproducía exactamente por no respetar el
+    // marcador de límite de palabra nativo del tokenizador.
+
+    #[test]
+    fn append_token_word_aware_joins_subwords() {
+        // `" hol"` (inicia palabra) + `"a"` (subword) debe dar "hola",
+        // NO "hol a".
+        let mut b = String::new();
+        append_token_word_aware(&mut b, " hol");
+        append_token_word_aware(&mut b, "a");
+        assert_eq!(b, "hola");
+    }
+
+    #[test]
+    fn append_token_word_aware_keeps_punctuation_glued() {
+        // La puntuación llega sin espacio prefijo: debe pegarse a la
+        // palabra anterior ("Hola,", no "Hola ,").
+        let mut b = String::new();
+        append_token_word_aware(&mut b, " Hola");
+        append_token_word_aware(&mut b, ",");
+        append_token_word_aware(&mut b, " mundo");
+        assert_eq!(b, "Hola, mundo");
+    }
+
+    #[test]
+    fn append_token_word_aware_multi_segment_words() {
+        // Caso del log del bug: "probando sonido." reconstruido desde
+        // subwords intermedios.
+        let mut b = String::new();
+        for t in [" prob", "ando", " son", "ido", "."] {
+            append_token_word_aware(&mut b, t);
+        }
+        assert_eq!(b, "probando sonido.");
+    }
+
+    #[test]
+    fn append_token_word_aware_first_token_no_leading_space() {
+        // El primer token del buffer no debe arrastrar un espacio al
+        // frente aunque traiga marcador de palabra.
+        let mut b = String::new();
+        append_token_word_aware(&mut b, " Hola");
+        append_token_word_aware(&mut b, ".");
+        assert_eq!(b, "Hola.");
+    }
+
+    #[test]
+    fn append_token_word_aware_sentencepiece_marker() {
+        // El marcador SentencePiece ▁ (U+2581) también inicia palabra.
+        let mut b = String::new();
+        append_token_word_aware(&mut b, "\u{2581}Hola");
+        append_token_word_aware(&mut b, "\u{2581}mundo");
+        assert_eq!(b, "Hola mundo");
     }
 }
