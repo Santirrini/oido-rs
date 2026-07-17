@@ -449,6 +449,10 @@ fn main() -> Result<()> {
                 ActivePipeline::Batch(Pipeline::new(pipeline_cfg))
             }
             oido_config::SttMode::Streaming => {
+                tracing::warn!(
+                    mode = "streaming",
+                    "Modo de dictado en prueba (no estable). Solo Batch está recomendado para uso normal."
+                );
                 let st = st_opt
                     .clone()
                     .context("streamer no cargado en modo streaming")?;
@@ -462,6 +466,10 @@ fn main() -> Result<()> {
                 ActivePipeline::Streaming(oido_core::StreamingPipeline::new(pipeline_cfg))
             }
             oido_config::SttMode::Chunked => {
+                tracing::warn!(
+                    mode = "chunked",
+                    "Modo de dictado en prueba (no estable). Solo Batch está recomendado para uso normal."
+                );
                 // Chunked reusa el mismo backend WhisperCpp que Batch
                 // (transcribe_timed vive en el mismo struct). Requiere
                 // `chunk_duration_secs`; 5.0s es el default recomendado.

@@ -177,7 +177,23 @@ No se permite dependencia cíclica. Si la piensas, refactoriza.
 - `cargo nextest` prueba los comandos. UI sólo se smoke-testea manual al
   cerrar cada fase.
 
-## Flujo de datos detallado
+## Estado de los modos de dictado
+
+El enum `SttMode` (en `crates/oido-config/src/lib.rs`) admite tres variantes, pero **solo `Batch` es estable y de uso diario**. Las otras dos se conservan accesibles para experimentación y se señalizan explícitamente como "en prueba" — tanto en el menú nativo de bandeja (sufijo `· en prueba`) como en un `tracing::warn!` en el arranque.
+
+| Modo       | Pipeline                                | Estado     | Notas para developers                                                                          |
+|------------|-----------------------------------------|------------|-------------------------------------------------------------------------------------------------|
+| `Batch`    | `oido-core::pipeline::Pipeline`         | ✅ Estable | Default (`SttMode::Batch`). Hold-to-talk clásico. MVP original; base recomendada.               |
+| `Streaming`| `oido-core::streaming_pipeline::…`      | 🧪 En prueba | LocalAgreement-2 con ticker de 1s. Verificado en su openspec pero no es uso diario.            |
+| `Chunked`  | `oido-core::chunked_pipeline::…`        | 🧪 En prueba | Bloques de ~5s con timestamps por palabra. Carryover eliminado por races (commit 95bbb9d).    |
+
+Cómo se señaliza:
+
+- **UI de usuario:** `crates/oido-tray/src/tray/i18n.rs` añade los sufijos `· estable`, `· en prueba` (y variantes bilingüe/EN) a los labels del submenú "Modo de dictado". Los items siguen siendo seleccionables; no se deshabilitan.
+- **Runtime:** en `crates/oido/src/main.rs`, dentro del `match mode` que arranca el pipeline, las ramas `Streaming` y `Chunked` emiten un `tracing::warn!(mode = …)` la primera vez que se construyen (tanto en arranque como en cambio en caliente vía menú).
+- **Docs:** el doc-comment de `SttMode` lista el estado de cada variante; esta tabla es la referencia canónica.
+
+**Importante:** no hay Cargo feature flags ni gating de compile-time. El gating es puramente señalización (label + log). Quien edite `config.json` a mano puede seguir activando cualquier modo.
 
 ```
                 ┌────────────────────────────────────────────────────────────┐

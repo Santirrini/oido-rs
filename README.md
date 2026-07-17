@@ -148,6 +148,14 @@ Cobertura actual de tests:
 | 7    | ⏳                | Accesibilidad WCAG 2.1 AA                        |
 | 8    | ⏳                | Wayland + paquetes nativos                       |
 
+### Modos de dictado
+
+Solo **Batch** es estable y se recomienda para uso diario. **Streaming** y
+**Chunked** están marcados como `en prueba` en el menú de bandeja y emiten
+un `tracing::warn!` al cargarse; siguen siendo seleccionables para
+experimentación. Detalle en `ARCHITECTURE.md` → "Estado de los modos de
+dictado".
+
 ## License
 
 MIT OR Apache-2.0.
