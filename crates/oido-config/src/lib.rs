@@ -29,12 +29,20 @@ fn default_theme() -> Theme {
 
 /// Modo de transcripción de audio (Batch, Streaming o Chunked).
 ///
-/// - `Batch`: hold-to-talk clásico. Se graba toda la sesión y se
-///   transcribe de una sola vez al soltar la tecla.
-/// - `Streaming`: transcripción incremental cada 1s con LocalAgreement-2.
-/// - `Chunked`: fragmenta audios largos en bloques de ~5s, transcribe
-///   cada bloque al vuelo y pega incrementalmente. Usa timestamps por
-///   palabra de whisper para cortar entre palabras sin truncar.
+/// Estado de madurez (ver también ARCHITECTURE.md → "Estado de los modos
+/// de dictado"):
+///
+/// - `Batch`: ✅ **Estable (recomendado).** Hold-to-talk clásico. Se graba
+///   toda la sesión y se transcribe de una sola vez al soltar la tecla.
+///   MVP original; default.
+/// - `Streaming`: 🧪 **En prueba.** Transcripción incremental cada 1s con
+///   LocalAgreement-2. Implementado y verificado en su cambio de openspec,
+///   pero no es el modo de uso diario; se mantiene accesible para pruebas.
+/// - `Chunked`: 🧪 **En prueba.** Fragmenta audios largos en bloques de
+///   ~5s, transcribe cada bloque al vuelo y pega incrementalmente. Usa
+///   timestamps por palabra de whisper para cortar entre palabras sin
+///   truncar. En estabilización activa: puede truncar palabras en la
+///   frontera de los chunks y el carryover fue eliminado por races.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SttMode {
