@@ -20,6 +20,8 @@ use oido_tray::{
 // `show_model_prompt_windows` sólo existe en la rama windows de oido-tray.
 #[cfg(target_os = "windows")]
 use oido_tray::show_model_prompt_windows;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use oido_tray::mismatch_tooltip;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -40,9 +42,43 @@ use hotkey_setup::run_set_hotkey;
 use model_lifecycle::{activate_after_download, handle_model_click};
 use models_setup::{
     download_vad_model_blocking, has_no_bin_files, resolve_models_dir, resolve_prompt_text,
-    resolve_vad_model_path, VAD_MODEL_FILENAME,
+    resolve_vad_model_path, sanitize_config, VAD_MODEL_FILENAME,
 };
 use runtime::ActivePipeline;
+
+/// Detecta mismatch "modelo solo-inglés activo con idioma distinto a en"
+/// y devuelve el filename del modelo multilingüe equivalente que se le
+/// debería sugerir al usuario (p.ej. `ggml-small.bin` para `ggml-small.
+/// en.bin`). Devuelve `None` si no hay mismatch o si no hay
+/// contraparte catalogada.
+fn detect_model_lang_mismatch(snap: &Config) -> Option<String> {
+    if !oido_models::is_english_only_model(&snap.model) {
+        return None;
+    }
+    if snap.language_ui.eq_ignore_ascii_case("en") {
+        return None;
+    }
+    oido_models::multilingual_counterpart(&snap.model).map(|e| e.filename.to_string())
+}
+
+/// Construye el `BuildContext` del menú a partir del snapshot actual de
+/// la config. Centraliza el cálculo de `model_lang_mismatch` para que
+/// todos los call sites (initial startup, `SetTheme`, `SetSttMode`,
+/// `SetUiLanguage`, `SetPromptPreset`, `RefreshMenu`) reflejen el
+/// mismo estado sin duplicar lógica.
+fn build_ctx(snap: &Config) -> BuildContext {
+    BuildContext {
+        models_dir: resolve_models_dir(),
+        active_model: snap.model.clone(),
+        ui_language: snap.ui_language,
+        theme: snap.theme,
+        stt_mode: snap.stt_mode,
+        prompt_preset: snap.prompt_preset,
+        prompt_custom_text: snap.system_prompt.clone(),
+        effort: snap.effort,
+        model_lang_mismatch: detect_model_lang_mismatch(snap),
+    }
+}
 
 fn main() -> Result<()> {
     // Cronómetro raíz del proceso: se usa para reportar el tiempo total
@@ -122,6 +158,69 @@ fn main() -> Result<()> {
     // Manejar modificación persistente de tema/idioma vía CLI si se solicitaron
     let mut snap = cfg.snapshot();
     let mut changed = false;
+
+    // Sanitización one-shot: reescribe estados inconsistentes de la
+    // config (típicamente `prompt_preset=Custom` con `system_prompt`
+    // vacío por edición manual del config.json o por una versión vieja
+    // del bin). Si hubo cambio, refrescamos `snap` para que el resto
+    // del startup vea el valor ya corregido.
+    if sanitize_config(&cfg) {
+        snap = cfg.snapshot();
+        tracing::info!("config sanitizada en disco; recargada para esta sesión");
+    }
+
+    // Auto-recovery: si `Config.model` apunta a un archivo inválido
+    // — VAD, archivo inexistente, o filename no catalogado — caemos
+    // al primer whisper válido disponible. Sin esto, GGML_ASSERT en
+    // `whisper_model_load` aborta el proceso con
+    // STATUS_STACK_BUFFER_OVERRUN al primer press del hotkey (o al
+    // startup si el modelo se carga eager). El fallback es tolerante:
+    // si no hay nada, deja el valor como está y el flow posterior
+    // (lazy-loader + first-run dialog en Windows) se encargará de
+    // descargar `ggml-base.bin`.
+    let models_dir_for_recovery = crate::resolve_models_dir();
+    {
+        let configured = &snap.model;
+        let on_disk = models_dir_for_recovery.join(configured).is_file();
+        let is_vad = oido_stt::is_vad_model_filename(configured);
+        let needs_recovery = is_vad || !on_disk;
+        if needs_recovery {
+            tracing::warn!(
+                model = %configured,
+                on_disk,
+                is_vad,
+                "Config.model apunta a un modelo inválido; buscando fallback"
+            );
+            if let Some(fallback) =
+                crate::model_lifecycle::whisper_fallback_filename(&models_dir_for_recovery)
+            {
+                if fallback != *configured {
+                    tracing::info!(
+                        from = %configured,
+                        to = %fallback,
+                        "auto-recovery: corrigiendo Config.model al primer whisper instalado"
+                    );
+                    snap.model = fallback.clone();
+                    cfg.replace(snap.clone());
+                    if let Err(e) = cfg.save() {
+                        tracing::error!(?e, "no se pudo persistir auto-recovery de model");
+                    }
+                }
+            } else if is_vad {
+                // Caso patológico: la config apuntaba a un VAD y no
+                // hay NINGÚN modelo whisper instalado. Forzamos el
+                // default y dejamos que el rest del flujo (first-run
+                // prompt, comando `oido --set-model`, etc.) lo
+                // descargue.
+                tracing::warn!(
+                    "no hay whisper instalado; revirtiendo Config.model al default (ggml-base.bin)"
+                );
+                snap.model = "ggml-base.bin".into();
+                cfg.replace(snap.clone());
+                let _ = cfg.save();
+            }
+        }
+    }
 
     if let Some(ref theme_str) = cli.theme {
         let theme = match theme_str.as_str() {
@@ -211,6 +310,28 @@ fn main() -> Result<()> {
         "startup phase completa"
     );
 
+    // Reconstruir el árbol inicial con el `BuildContext` completo,
+    // incluyendo la detección de mismatch modelo/idioma. Esto es
+    // necesario porque `PlatformTray::new` solo conoce el subconjunto
+    // mínimo y siempre construye `BuildContext::initial` (con
+    // `model_lang_mismatch: None`). Sin este rebuild, el ítem de aviso
+    // ⚠ nunca aparecería en el primer arranque.
+    if let Some(ref mut t) = tray {
+        let sections = default_sections(&build_ctx(&snap));
+        if let Err(e) = t.rebuild_menu(sections) {
+            tracing::error!(?e, "no se pudo reconstruir el menú inicial");
+        }
+        // Si hay mismatch, sobrescribe el tooltip con el aviso
+        // persistente. El icono sigue reflejando el estado operativo
+        // vía `set_state` más abajo.
+        if detect_model_lang_mismatch(&snap).is_some() {
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                let _ = t.set_tooltip(&mismatch_tooltip(snap.ui_language));
+            }
+        }
+    }
+
     // 3) Cargar modelo whisper. GPU + threads vienen de Config.
     let model_path = models_dir.join(&snap.model);
     tracing::info!(?model_path, "cargando modelo whisper");
@@ -274,7 +395,8 @@ fn main() -> Result<()> {
         let prompt = resolve_prompt_text(&snap);
         let mut stt_builder = WhisperCpp::with_language(&snap.language_ui)
             .with_initial_prompt(&prompt)
-            .with_runtime(gpu_config, n_threads_per_worker);
+            .with_runtime(gpu_config, n_threads_per_worker)
+            .with_effort(snap.effort);
         let stt = if let Some(ref vp) = vad_path {
             stt_builder = stt_builder.with_vad(vp.clone());
             stt_builder
@@ -289,6 +411,7 @@ fn main() -> Result<()> {
         tracing::info!(
             path = ?model_path,
             prompt_chars = prompt.chars().count(),
+            effort = ?snap.effort,
             "modelo whisper NO se carga al startup (lazy); se cargará en el primer press del hotkey"
         );
         let shared = SharedTranscriber::new(stt);
@@ -302,7 +425,8 @@ fn main() -> Result<()> {
             gpu_config,
             n_threads_per_worker,
         )
-        .with_initial_prompt(&prompt);
+        .with_initial_prompt(&prompt)
+        .with_effort(snap.effort);
         // **Lazy load**: ver comentario en la rama Batch. El modelo
         // streaming se carga en la primera pulsación del hotkey.
         tracing::info!(
@@ -341,6 +465,35 @@ fn main() -> Result<()> {
                             let _ =
                                 control_tx_for_menu.send(ControlMessage::SetPromptPreset(preset));
                         }
+                        MenuAction::SetEffort(preset) => {
+                            let _ =
+                                control_tx_for_menu.send(ControlMessage::SetEffort(preset));
+                        }
+                        MenuAction::EditPrompt => {
+                            // Abrir el config.json del usuario en el editor
+                            // nativo del OS (Bloc de Notas en Windows, etc.)
+                            // para editar el campo `system_prompt` con todas
+                            // las comodidades de un editor de verdad.
+                            //
+                            // Como `show_prompt_editor_windows` bloquea el
+                            // hilo del listener mientras el usuario edita,
+                            // el hotkey queda momentáneamente en cola; es un
+                            // trade-off aceptable (la edición es ocasional)
+                            // y mantiene el `unsafe` Win32 confinado al crate.
+                            let config_path = oido_config::config_file();
+                            let res = oido_tray::show_prompt_editor_windows(&config_path);
+                            if res.is_none() {
+                                tracing::error!(
+                                    path = ?config_path,
+                                    "no se pudo abrir el editor de texto para el prompt"
+                                );
+                            }
+                            // El reload de config y la propagación al STT
+                            // ocurren en el siguiente arranque (cambio de
+                            // hotkey, mode-switch, o restart). No es un
+                            // reload hot porque el bin no observa el mtime
+                            // de config.json (ver ConfigStore::load_or_default).
+                        }
                         MenuAction::OpenModelsDir => {
                             let models_dir = resolve_models_dir();
                             if let Err(e) = open::that(&models_dir) {
@@ -354,6 +507,34 @@ fn main() -> Result<()> {
                                 &cfg_for_menu,
                                 shared_for_menu.as_ref(),
                             );
+                        }
+                        MenuAction::FixModelLanguage(_suggested) => {
+                            // El id canónico no viaja el filename (la
+                            // sección compone el label, no el id) —
+                            // resolvemos aquí el contraparte
+                            // multilingüe desde la config actual para
+                            // no arrastrar estado a través del canal.
+                            // Si por algún motivo ya no hay mismatch
+                            // (carrera con un SetSttMode o cambio de
+                            // modelo), no hacemos nada.
+                            let snap = cfg_for_menu.snapshot();
+                            if let Some(target) = detect_model_lang_mismatch(&snap) {
+                                tracing::info!(
+                                    from = %snap.model,
+                                    to = %target,
+                                    "FixModelLanguage: usuario aceptó el cambio sugerido"
+                                );
+                                handle_model_click(
+                                    &target,
+                                    &control_tx_for_menu,
+                                    &cfg_for_menu,
+                                    shared_for_menu.as_ref(),
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "FixModelLanguage click sin mismatch activo; ignorado"
+                                );
+                            }
                         }
                         MenuAction::CheckUpdates => {
                             #[cfg(feature = "updater")]
@@ -883,16 +1064,7 @@ fn main() -> Result<()> {
                         // la marca ✓ del tema activo. Sin esta llamada,
                         // el ✓ del tema anterior permanece visible
                         // aunque la config ya esté actualizada.
-                        let ctx = BuildContext {
-                            models_dir: resolve_models_dir(),
-                            active_model: snap.model.clone(),
-                            ui_language: snap.ui_language,
-                            theme: snap.theme,
-                            stt_mode: snap.stt_mode,
-                            prompt_preset: snap.prompt_preset,
-                            prompt_custom_text: snap.system_prompt.clone(),
-                        };
-                        let sections = default_sections(&ctx);
+                        let sections = default_sections(&build_ctx(&snap));
                         if let Err(e) = t.rebuild_menu(sections) {
                             tracing::error!(
                                 ?e,
@@ -934,7 +1106,8 @@ fn main() -> Result<()> {
                                 let prompt = resolve_prompt_text(&snap);
                                 let mut stt_builder = WhisperCpp::with_language(&snap.language_ui)
                                     .with_initial_prompt(&prompt)
-                                    .with_runtime(gpu_config, n_threads_per_worker);
+                                    .with_runtime(gpu_config, n_threads_per_worker)
+                                    .with_effort(snap.effort);
                                 if let Some(vp) = vad_path.as_ref() {
                                     stt_builder = stt_builder.with_vad(vp.clone());
                                 }
@@ -960,7 +1133,8 @@ fn main() -> Result<()> {
                                     gpu_config,
                                     n_threads_per_worker,
                                 )
-                                .with_initial_prompt(&prompt);
+                                .with_initial_prompt(&prompt)
+                                .with_effort(snap.effort);
                                 if let Err(e) = st.load_model(&model_path) {
                                     tracing::warn!(
                                         ?e,
@@ -995,16 +1169,7 @@ fn main() -> Result<()> {
                                     // el ✓ del modo anterior aunque la
                                     // config ya esté actualizada y el
                                     // pipeline corra en el nuevo modo.
-                                    let ctx = BuildContext {
-                                        models_dir: resolve_models_dir(),
-                                        active_model: snap.model.clone(),
-                                        ui_language: snap.ui_language,
-                                        theme: snap.theme,
-                                        stt_mode: snap.stt_mode,
-                                        prompt_preset: snap.prompt_preset,
-                                        prompt_custom_text: snap.system_prompt.clone(),
-                                    };
-                                    let sections = default_sections(&ctx);
+                                    let sections = default_sections(&build_ctx(&snap));
                                     if let Err(e) = t.rebuild_menu(sections) {
                                         tracing::error!(
                                             ?e,
@@ -1039,17 +1204,8 @@ fn main() -> Result<()> {
                     // strings. Mantenemos el tema, modo, prompt, etc. del
                     // snapshot actual.
                     let snap = cfg.snapshot();
-                    let ctx = BuildContext {
-                        models_dir: resolve_models_dir(),
-                        active_model: snap.model.clone(),
-                        ui_language: snap.ui_language,
-                        theme: snap.theme,
-                        stt_mode: snap.stt_mode,
-                        prompt_preset: snap.prompt_preset,
-                        prompt_custom_text: snap.system_prompt.clone(),
-                    };
                     if let Some(ref mut t) = tray {
-                        let sections = default_sections(&ctx);
+                        let sections = default_sections(&build_ctx(&snap));
                         if let Err(e) = t.rebuild_menu(sections) {
                             tracing::error!(
                                 ?e,
@@ -1084,17 +1240,8 @@ fn main() -> Result<()> {
                     }
                     // Reconstruir el menú para refrescar la marca ✓ del
                     // preset activo y el preview del texto custom.
-                    let ctx = BuildContext {
-                        models_dir: resolve_models_dir(),
-                        active_model: snap.model.clone(),
-                        ui_language: snap.ui_language,
-                        theme: snap.theme,
-                        stt_mode: snap.stt_mode,
-                        prompt_preset: snap.prompt_preset,
-                        prompt_custom_text: snap.system_prompt.clone(),
-                    };
                     if let Some(ref mut t) = tray {
-                        let sections = default_sections(&ctx);
+                        let sections = default_sections(&build_ctx(&snap));
                         if let Err(e) = t.rebuild_menu(sections) {
                             tracing::error!(
                                 ?e,
@@ -1103,18 +1250,52 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                ControlMessage::SetEffort(preset) => {
+                    // El esfuerzo solo afecta a los `FullParams` que se
+                    // construyen en cada transcripción; no requiere
+                    // recargar el modelo ni reiniciar el pipeline (hot
+                    // reload), igual que `SetPromptPreset`.
+                    let mut snap = cfg.snapshot();
+                    if snap.effort == preset {
+                        // No-op: re-emitir el menú refresca marcas ✓ sin
+                        // trabajo real, pero evita la propagación inútil.
+                    } else {
+                        snap.effort = preset;
+                        cfg.replace(snap.clone());
+                        if let Err(e) = cfg.save() {
+                            tracing::error!(
+                                ?e,
+                                "no se pudo guardar la configuración de esfuerzo"
+                            );
+                        } else {
+                            tracing::info!(?preset, "esfuerzo de decodificación actualizado");
+                        }
+                        // Propagar al STT en runtime (Batch y Streaming)
+                        // sin recargar el modelo. Toma el lock brevemente.
+                        if let Some(shared) = &shared_transcriber {
+                            shared.set_effort(preset);
+                            tracing::info!("esfuerzo propagado a SharedTranscriber");
+                        }
+                        if let Some(stream) = streamer.as_mut() {
+                            stream.set_effort(preset);
+                            tracing::info!("esfuerzo propagado a LocalAgreementStreamer");
+                        }
+                    }
+                    // Reconstruir el menú para refrescar la marca ✓ del
+                    // preset activo.
+                    if let Some(ref mut t) = tray {
+                        let sections = default_sections(&build_ctx(&snap));
+                        if let Err(e) = t.rebuild_menu(sections) {
+                            tracing::error!(
+                                ?e,
+                                "no se pudo reconstruir el menú tras cambio de esfuerzo"
+                            );
+                        }
+                    }
+                }
                 ControlMessage::RefreshMenu => {
                     let snap = cfg.snapshot();
-                    let ctx = BuildContext {
-                        models_dir: resolve_models_dir(),
-                        active_model: snap.model.clone(),
-                        ui_language: snap.ui_language,
-                        theme: snap.theme,
-                        stt_mode: snap.stt_mode,
-                        prompt_preset: snap.prompt_preset,
-                        prompt_custom_text: snap.system_prompt.clone(),
-                    };
-                    let sections = default_sections(&ctx);
+                    let sections = default_sections(&build_ctx(&snap));
                     if let Some(ref mut t) = tray {
                         if let Err(e) = t.rebuild_menu(sections) {
                             tracing::error!(?e, "no se pudo reconstruir el menú");

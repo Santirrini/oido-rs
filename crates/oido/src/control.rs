@@ -23,6 +23,10 @@ pub(crate) enum ControlMessage {
     /// Click sobre el submenú "Prompt del sistema". El bin decide qué
     /// texto concreto se inyecta a whisper.cpp (preset vs. custom).
     SetPromptPreset(oido_config::PromptPreset),
+    /// Click sobre el submenú "Esfuerzo". Mapea a `FullParams` de
+    /// whisper.cpp y se propaga en caliente a transcriber/streamer
+    /// (no requiere recargar modelo ni reiniciar pipeline).
+    SetEffort(oido_config::EffortPreset),
     Exit,
     /// Reconstruye el submenú "Modelos" con el estado actual del disco.
     /// Se envía tras una descarga o tras activar un modelo distinto,

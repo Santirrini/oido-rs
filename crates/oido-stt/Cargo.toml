@@ -22,6 +22,10 @@ audio-smoke = []
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
+# Para el enum `EffortPreset` y sus setters/valores. Aceptable
+# porque `oido-config` no depende de `oido-stt` (solo de serde),
+# evitando así circularidad.
+oido-config = { path = "../oido-config", version = "0.1.0" }
 
 # Fase 1: whisper-rs enlaza y compila whisper.cpp estáticamente. Build
 # pesa bastante (cmake + toolchain C++); ver CI install steps.

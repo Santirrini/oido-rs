@@ -46,6 +46,11 @@ pub struct LocalAgreementStreamer {
     system_prompt: Option<String>,
     gpu_config: crate::GpuConfig,
     n_threads: u16,
+    /// Preset de "esfuerzo" de decodificación. Mismo significado que en
+    /// `WhisperCpp` y se mapea a `FullParams` en `process()`/`warm_up()`
+    /// vía `build_streaming_params`. Default = `Balanced` (comportamiento
+    /// histórico: greedy best_of=1).
+    effort: oido_config::EffortPreset,
 
     // Estado interno del algoritmo LocalAgreement-2
     prev_tokens: Vec<i32>,
@@ -65,6 +70,7 @@ impl Clone for LocalAgreementStreamer {
             system_prompt: self.system_prompt.clone(),
             gpu_config: self.gpu_config,
             n_threads: self.n_threads,
+            effort: self.effort,
             prev_tokens: Vec::new(),
             confirmed_count: 0,
         }
@@ -81,6 +87,7 @@ impl LocalAgreementStreamer {
             system_prompt: None,
             gpu_config,
             n_threads,
+            effort: oido_config::EffortPreset::Balanced,
             prev_tokens: Vec::new(),
             confirmed_count: 0,
         }
@@ -98,6 +105,14 @@ impl LocalAgreementStreamer {
         self
     }
 
+    /// Configura el preset de esfuerzo de decodificación. Se aplica en
+    /// el próximo `process()` o `warm_up()`; no recarga el modelo.
+    #[must_use]
+    pub fn with_effort(mut self, preset: oido_config::EffortPreset) -> Self {
+        self.effort = preset;
+        self
+    }
+
     /// Setter runtime del system prompt. Se aplica en el próximo
     /// `process()`; no requiere recargar el modelo.
     pub fn set_initial_prompt(&mut self, prompt: impl Into<String>) {
@@ -108,6 +123,12 @@ impl LocalAgreementStreamer {
     /// Setter runtime del idioma.
     pub fn set_language(&mut self, language: impl Into<String>) {
         self.language = Some(language.into());
+    }
+
+    /// Setter runtime del preset de esfuerzo. Se aplica en el próximo
+    /// `process()`. NO recarga el modelo.
+    pub fn set_effort(&mut self, preset: oido_config::EffortPreset) {
+        self.effort = preset;
     }
 
     /// Carga el modelo Whisper en memoria y crea el WhisperState persistente.
@@ -155,6 +176,7 @@ impl LocalAgreementStreamer {
             self.language.as_deref(),
             self.system_prompt.as_deref(),
             self.n_threads,
+            self.effort,
         );
         state
             .full(params, &silence)
@@ -194,6 +216,7 @@ impl LocalAgreementStreamer {
             self.language.as_deref(),
             self.system_prompt.as_deref(),
             self.n_threads,
+            self.effort,
         );
 
         // Ajustar dinámicamente la ventana del contexto de audio

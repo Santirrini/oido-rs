@@ -23,10 +23,38 @@ use thiserror::Error;
 pub enum SttError {
     #[error("modelo no encontrado: {0}")]
     ModelNotFound(std::path::PathBuf),
+    /// El path no apunta a un modelo whisper válido — p.ej. apunta a
+    /// un modelo VAD (Silero) u otro artefacto que ggml no entiende
+    /// como pesos de whisper. GGML_ASSERT(wtype != GGML_TYPE_COUNT)
+    /// en whisper_model_load protege contra esto; devolvemos este
+    /// error limpio para **evitar que el proceso muera con
+    /// STATUS_STACK_BUFFER_OVERRUN** (GGML aborta con ese código al
+    /// fallar el assert). Ver `crate::is_vad_model_filename` para
+    /// la heurística de detección.
+    #[error("archivo no es un modelo whisper válido (parece ser {kind}): {path}")]
+    ModelNotWhisper { path: std::path::PathBuf, kind: &'static str },
     #[error("buffer de audio demasiado corto: {0} samples")]
     AudioTooShort(usize),
     #[error("backend whisper devolvió error: {0}")]
     Backend(String),
+}
+
+/// Heurística: ¿este filename corresponde a un modelo **VAD** (no a
+/// un modelo whisper de transcripción)? Los modelos VAD viven en el
+/// mismo `models_dir` que los whisper y se descubren con el mismo
+/// catálogo, así que es fácil que el usuario o un handler de UI
+/// activado con un click termine intentando cargar uno como modelo de
+/// transcripción. GGML falla con `GGML_ASSERT(wtype != GGML_TYPE_COUNT)`
+/// porque el header del archivo VAD no tiene un ftype reconocido por
+/// `ggml_ftype_to_ggml_type`. Detectarlo aquí evita ese crash.
+pub fn is_vad_model_filename(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    // Convención stable hasta la fecha: `ggml-silero-v*.bin`.
+    lower.starts_with("ggml-silero-")
+        || lower.contains("-vad-")
+        || lower.contains("-vad.bin")
+        || (lower.contains("vad") && lower.ends_with(".bin") && !lower.starts_with("ggml-"))
+            // el último caso es defensivo, p.ej. `silero-vad-v5.bin`
 }
 
 /// Resultado de una transcripción con información de timestamps por
@@ -143,6 +171,16 @@ impl SharedTranscriber {
     /// prompt. Mismo contrato que `WhisperCpp::set_initial_prompt`.
     pub fn set_initial_prompt(&self, prompt: impl Into<String>) {
         self.inner.lock().set_initial_prompt(prompt);
+    }
+
+    /// Cambia el preset de esfuerzo de decodificación en runtime. NO
+    /// recarga el modelo: solo actualiza el campo que `build_base_params`
+    /// / `build_chunked_params` lee en cada llamada (la próxima
+    /// transcripción usará los nuevos parámetros). Toma el lock
+    /// brevemente. Misma semántica que `set_language` /
+    /// `set_initial_prompt`.
+    pub fn set_effort(&self, preset: oido_config::EffortPreset) {
+        self.inner.lock().set_effort(preset);
     }
 }
 

@@ -99,6 +99,42 @@ fn default_system_prompt() -> String {
     String::new()
 }
 
+/// Preset de "esfuerzo de decodificación" del motor whisper.cpp.
+///
+/// whisper.cpp no expone un único parámetro `effort` como la OpenAI API.
+/// El esfuerzo real se modela combinando: estrategia de muestreo
+/// (`greedy {best_of}` vs `BeamSearch {beam_size}`), `temperature_inc`
+/// (con qué agresividad incrementa la temperatura si la decodificación
+/// falla) y `entropy_thold` (umbral de confianza para descartar
+/// segmentos inseguros). `length_penalty` solo se aplica en beam.
+///
+/// Estado de madurez: estable para los tres (no hay cambios de API que
+/// rompan el contrato). Default = `Balanced` = comportamiento histórico
+/// exacto (greedy best_of=1, temp_inc=0, entropy=2.4) — actualizar no
+/// introduce regresión de velocidad para usuarios existentes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffortPreset {
+    /// Greedy best_of=1, sin fallback de temperatura. Más rápido y
+    /// determinista. Recomendado para dictado hold-to-talk de frases
+    /// cortas-medias donde la latencia importa más que la perfección.
+    Balanced,
+    /// Greedy best_of=5, temperature_inc=0.2 (reintenta con
+    /// temperaturas más altas si falla), entropy_thold=1.8. Más
+    /// robusto frente a audios ambiguos o con ruido; ~1.5-2× más
+    /// lento.
+    Robust,
+    /// Beam search (beam_size=5), length_penalty=-1.0,
+    /// temperature_inc=0.2, entropy_thold=1.8. La mejor calidad de
+    /// transcripción al coste de ~3-5× más CPU que `Balanced`. Útil
+    /// para dictados largos o cuando cada palabra importa.
+    HighQuality,
+}
+
+fn default_effort_preset() -> EffortPreset {
+    EffortPreset::Balanced
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -140,6 +176,10 @@ pub struct Config {
     /// `prompt_preset == Custom`. Vacío por default.
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Preset de esfuerzo de decodificación de whisper.cpp. Default:
+    /// `Balanced` (greedy best_of=1, comportamiento histórico).
+    #[serde(default = "default_effort_preset")]
+    pub effort: EffortPreset,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
@@ -164,6 +204,7 @@ impl Default for Config {
             ui_language: default_ui_language(),
             prompt_preset: default_prompt_preset(),
             system_prompt: default_system_prompt(),
+            effort: default_effort_preset(),
         }
     }
 }
@@ -258,6 +299,17 @@ impl ConfigStore {
         })
     }
 
+    /// Construye un `ConfigStore` con un path arbitrario y un `Config`
+    /// explícito. Útil para tests aislados (sin tocar el
+    /// `config.json` real del usuario) y para futuros flujos de
+    /// multi-config. El directorio del `path` NO se crea; `save()` lo
+    /// crea implícitamente vía `atomic_write`.
+    pub fn new_at(path: PathBuf, config: Config) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(Inner { config, path }),
+        }
+    }
+
     pub fn snapshot(&self) -> Config {
         self.inner.lock().config.clone()
     }
@@ -309,6 +361,11 @@ mod tests {
                     PromptPreset::Custom,
                 ]),
                 any::<String>(),
+                proptest::sample::select(vec![
+                    EffortPreset::Balanced,
+                    EffortPreset::Robust,
+                    EffortPreset::HighQuality,
+                ]),
             )
                 .prop_map(
                     |(
@@ -322,6 +379,7 @@ mod tests {
                         ui_language,
                         prompt_preset,
                         system_prompt,
+                        effort,
                     )| Self {
                         hotkey,
                         model,
@@ -333,6 +391,7 @@ mod tests {
                         ui_language,
                         prompt_preset,
                         system_prompt,
+                        effort,
                     },
                 )
                 .boxed()
@@ -350,6 +409,9 @@ mod tests {
         assert_eq!(cfg.ui_language, UiLanguage::Es);
         assert_eq!(cfg.prompt_preset, PromptPreset::BilingualEsEn);
         assert!(cfg.system_prompt.is_empty());
+        // El default histórico debe ser Balanced para mantener la
+        // compatibilidad de velocidad 1× con releases anteriores.
+        assert_eq!(cfg.effort, EffortPreset::Balanced);
     }
 
     #[test]
@@ -389,6 +451,30 @@ mod tests {
         assert_eq!(cfg.ui_language, UiLanguage::Es);
         assert_eq!(cfg.prompt_preset, PromptPreset::BilingualEsEn);
         assert!(cfg.system_prompt.is_empty());
+    }
+
+    /// Configs previas a la introducción del `EffortPreset` deben
+    /// parsear con el default (`Balanced`), preservando el
+    /// comportamiento histórico exacto para usuarios que actualizan.
+    #[test]
+    fn backward_compat_missing_effort_field_uses_balanced() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON sin effort debe parsear");
+        assert_eq!(cfg.effort, EffortPreset::Balanced);
+    }
+
+    /// `EffortPreset` se serializa en kebab-case en `config.json` para
+    /// que el usuario pueda editarlo a mano.
+    #[test]
+    fn effort_serializes_kebab_case() {
+        for (preset, expected) in [
+            (EffortPreset::Balanced, "\"balanced\""),
+            (EffortPreset::Robust, "\"robust\""),
+            (EffortPreset::HighQuality, "\"high-quality\""),
+        ] {
+            let s = serde_json::to_string(&preset).unwrap();
+            assert_eq!(s, expected, "EffortPreset::{preset:?} esperaba {expected}");
+        }
     }
 
     /// El prompt personalizado puede persistirse y recuperarse intacto.

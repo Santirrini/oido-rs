@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use oido_config::{PromptPreset, SttMode, Theme, UiLanguage};
+use oido_config::{EffortPreset, PromptPreset, SttMode, Theme, UiLanguage};
 use oido_models::{ModelEntry, ModelFamily};
 
 use crate::traits::MenuAction;
@@ -99,6 +99,44 @@ pub fn item_id(filename: &str) -> ItemId {
 // ---------------------------------------------------------------------------
 // Secciones existentes — refactor a `UiLanguage` interno
 // ---------------------------------------------------------------------------
+
+/// Sección de aviso no modal: visible SOLO cuando hay mismatch entre un
+/// modelo solo-inglés activo y un idioma distinto a "en". Renderiza un
+/// único item raíz con id `"fix_model_lang"` que, al pulsarse, dispara
+/// `MenuAction::FixModelLanguage`. El bin, en el handler, recalcula el
+/// contraparte multilingüe desde la config (`oido_models::multilingual_
+/// counterpart`) y delega en el mismo `handle_model_click` que el
+/// submenú Modelos (descarga si no está, activa si está).
+///
+/// Llevamos el `suggested_filename` solo para componer el label del
+/// item ("⚠ Cambiar a modelo multilingüe (ggml-small.bin)…"). El `id`
+/// canónico es siempre `"fix_model_lang"` para que `id_to_action` no
+/// tenga que parsear nombres de archivo.
+#[derive(Debug)]
+pub struct ModelLangMismatchSection {
+    pub ui_language: UiLanguage,
+    pub suggested_filename: Option<String>,
+}
+
+impl MenuSection for ModelLangMismatchSection {
+    fn id(&self) -> &'static str {
+        "model_lang_mismatch"
+    }
+    fn build(&self) -> Vec<Section> {
+        // Sin sugerencia → no renderizamos nada. Esta rama es la que
+        // mantiene el árbol idéntico al previo cuando NO hay mismatch.
+        let Some(suggested) = self.suggested_filename.as_deref() else {
+            return Vec::new();
+        };
+        let s = strings(self.ui_language);
+        let label = format!("{} ({})", s.model_lang_mismatch_action, suggested);
+        vec![Section::Item(MenuItemSpec {
+            id: "fix_model_lang".into(),
+            label,
+            enabled: true,
+        })]
+    }
+}
 
 /// Sección "Cambiar hotkey". Item simple en el nivel raíz.
 #[derive(Debug)]
@@ -217,8 +255,62 @@ impl MenuSection for ModeSection {
 }
 
 // ---------------------------------------------------------------------------
-// Secciones NUEVAS: Idioma de la UI + Prompt del sistema
+// Secciones NUEVAS: Idioma de la UI + Prompt del sistema + Esfuerzo
 // ---------------------------------------------------------------------------
+
+/// Sección "Esfuerzo de decodificación" — submenú con los 3 presets
+/// que controlan los parámetros de `FullParams` de whisper.cpp
+/// (estrategia de muestreo, `temperature_inc`, `entropy_thold`,
+/// `length_penalty`).
+///
+/// Ver `oido_stt::preset_settings` para el mapping concreto de cada
+/// preset a los setters de `FullParams`.
+#[derive(Debug)]
+pub struct EffortSection {
+    pub ui_language: UiLanguage,
+    pub current: EffortPreset,
+}
+
+impl MenuSection for EffortSection {
+    fn id(&self) -> &'static str {
+        "effort"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        vec![Section::Submenu {
+            label: s.effort.into(),
+            items: vec![
+                MenuItemSpec {
+                    id: "effort_balanced".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == EffortPreset::Balanced),
+                        s.effort_balanced
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "effort_robust".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == EffortPreset::Robust),
+                        s.effort_robust
+                    ),
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "effort_high_quality".into(),
+                    label: format!(
+                        "{}{}",
+                        check_or_blank(self.current == EffortPreset::HighQuality),
+                        s.effort_high_quality
+                    ),
+                    enabled: true,
+                },
+            ],
+        }]
+    }
+}
 
 /// Sección "Idioma de la interfaz" — submenú con ES / EN / Bilingüe.
 #[derive(Debug)]
@@ -267,12 +359,17 @@ impl MenuSection for UiLanguageSection {
     }
 }
 
-/// Sección "Prompt del sistema" — submenú con 4 presets.
+/// Sección "Prompt del sistema" — submenú con los presets y un atajo a
+/// la edición del config.json (campo `system_prompt`).
 ///
-/// El item `prompt_custom` no abre un sub-flujo de edición (no hay
-/// `TextInput` en el backend de bandeja); el usuario edita el texto
-/// crudo vía CLI `oido.exe --set-prompt "..."`. El label del item
-/// lleva un hint apuntando a esa vía.
+/// - `prompt_bilingual` / `prompt_es` / `prompt_en`: presets
+///   hardcoded sin texto editable.
+/// - `prompt_custom`: selector del preset Custom. El label lleva un
+///   preview (o un hint apuntando a la CLI `--set-prompt`).
+/// - `prompt_edit`: abre el `config.json` del usuario en el editor de
+///   texto nativo del OS (Bloc de Notas en Windows, xdg-open en
+///   Linux, `open -t` en macOS). Es la única vía para editar el campo
+///   `system_prompt` desde la interfaz sin tirar de CLI.
 #[derive(Debug)]
 pub struct PromptSection {
     pub ui_language: UiLanguage,
@@ -342,6 +439,11 @@ impl MenuSection for PromptSection {
                 MenuItemSpec {
                     id: "prompt_custom".into(),
                     label: custom_label,
+                    enabled: true,
+                },
+                MenuItemSpec {
+                    id: "prompt_edit".into(),
+                    label: s.prompt_edit.into(),
                     enabled: true,
                 },
             ],
@@ -427,6 +529,8 @@ impl MenuSection for ModelsSection {
             ModelFamily::Tiny,
             ModelFamily::Base,
             ModelFamily::Small,
+            ModelFamily::Medium,
+            ModelFamily::Large,
             ModelFamily::Vad,
         ] {
             // Encabezado de familia (item deshabilitado para que actúe
@@ -435,6 +539,8 @@ impl MenuSection for ModelsSection {
                 ModelFamily::Tiny => s.model_tiny,
                 ModelFamily::Base => s.model_base,
                 ModelFamily::Small => s.model_small,
+                ModelFamily::Medium => s.model_medium,
+                ModelFamily::Large => s.model_large,
                 ModelFamily::Vad => s.model_vad,
             };
             model_items.push(MenuItemSpec {
@@ -513,6 +619,12 @@ pub struct BuildContext {
     pub stt_mode: SttMode,
     pub prompt_preset: PromptPreset,
     pub prompt_custom_text: String,
+    pub effort: EffortPreset,
+    /// `Some(filename)` cuando hay mismatch entre un modelo solo-inglés
+    /// activo y un idioma distinto a "en"; el bin pasa el filename del
+    /// modelo multilingüe equivalente (p.ej. `"ggml-small.bin"`). Si es
+    /// `None`, no se renderiza la sección de aviso.
+    pub model_lang_mismatch: Option<String>,
 }
 
 impl BuildContext {
@@ -529,6 +641,8 @@ impl BuildContext {
             stt_mode: SttMode::Batch,
             prompt_preset: PromptPreset::BilingualEsEn,
             prompt_custom_text: String::new(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
         }
     }
 }
@@ -538,35 +652,49 @@ impl BuildContext {
 /// El bin llama a `Tray::rebuild_menu` después de cada descarga o
 /// cambio de preferencia para refrescar el árbol.
 pub fn default_sections(ctx: &BuildContext) -> Vec<Box<dyn MenuSection>> {
-    vec![
-        Box::new(HotkeySection {
+    let mut out: Vec<Box<dyn MenuSection>> = Vec::with_capacity(8);
+    // Aviso de mismatch: primero para máxima visibilidad. Solo se añade
+    // cuando hay sugerencia (Some); con None la sección renderiza 0 items
+    // pero igual la dejamos fuera para mantener `len() == 7` en el caso
+    // normal (consistente con tests previos).
+    if ctx.model_lang_mismatch.is_some() {
+        out.push(Box::new(ModelLangMismatchSection {
             ui_language: ctx.ui_language,
-        }),
-        Box::new(ThemeSection {
-            ui_language: ctx.ui_language,
-            current: ctx.theme,
-        }),
-        Box::new(ModeSection {
-            ui_language: ctx.ui_language,
-            current: ctx.stt_mode,
-        }),
-        Box::new(UiLanguageSection {
-            current: ctx.ui_language,
-        }),
-        Box::new(PromptSection {
-            ui_language: ctx.ui_language,
-            current: ctx.prompt_preset,
-            custom_text: ctx.prompt_custom_text.clone(),
-        }),
-        Box::new(ModelsSection::new(
-            ctx.models_dir.clone(),
-            ctx.active_model.clone(),
-            ctx.ui_language,
-        )),
-        Box::new(ExitSection {
-            ui_language: ctx.ui_language,
-        }),
-    ]
+            suggested_filename: ctx.model_lang_mismatch.clone(),
+        }));
+    }
+    out.push(Box::new(HotkeySection {
+        ui_language: ctx.ui_language,
+    }));
+    out.push(Box::new(ThemeSection {
+        ui_language: ctx.ui_language,
+        current: ctx.theme,
+    }));
+    out.push(Box::new(ModeSection {
+        ui_language: ctx.ui_language,
+        current: ctx.stt_mode,
+    }));
+    out.push(Box::new(EffortSection {
+        ui_language: ctx.ui_language,
+        current: ctx.effort,
+    }));
+    out.push(Box::new(UiLanguageSection {
+        current: ctx.ui_language,
+    }));
+    out.push(Box::new(PromptSection {
+        ui_language: ctx.ui_language,
+        current: ctx.prompt_preset,
+        custom_text: ctx.prompt_custom_text.clone(),
+    }));
+    out.push(Box::new(ModelsSection::new(
+        ctx.models_dir.clone(),
+        ctx.active_model.clone(),
+        ctx.ui_language,
+    )));
+    out.push(Box::new(ExitSection {
+        ui_language: ctx.ui_language,
+    }));
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +713,9 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
         "mode_batch" => MenuAction::SetSttMode(SttMode::Batch),
         "mode_streaming" => MenuAction::SetSttMode(SttMode::Streaming),
         "mode_chunked" => MenuAction::SetSttMode(SttMode::Chunked),
+        "effort_balanced" => MenuAction::SetEffort(EffortPreset::Balanced),
+        "effort_robust" => MenuAction::SetEffort(EffortPreset::Robust),
+        "effort_high_quality" => MenuAction::SetEffort(EffortPreset::HighQuality),
         "ui_es" => MenuAction::SetUiLanguage(UiLanguage::Es),
         "ui_en" => MenuAction::SetUiLanguage(UiLanguage::En),
         "ui_bil" => MenuAction::SetUiLanguage(UiLanguage::Bilingual),
@@ -592,9 +723,11 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
         "prompt_es" => MenuAction::SetPromptPreset(PromptPreset::SpanishOnly),
         "prompt_en" => MenuAction::SetPromptPreset(PromptPreset::EnglishOnly),
         "prompt_custom" => MenuAction::SetPromptPreset(PromptPreset::Custom),
+        "prompt_edit" => MenuAction::EditPrompt,
         "open_models_dir" => MenuAction::OpenModelsDir,
         "check_updates" => MenuAction::CheckUpdates,
         "exit" => MenuAction::Exit,
+        "fix_model_lang" => MenuAction::FixModelLanguage(String::new()),
         id if id.starts_with("model:") => MenuAction::ModelItem(id["model:".len()..].to_string()),
         _ => return None,
     })
@@ -639,6 +772,19 @@ mod tests {
             id_to_action("mode_chunked"),
             Some(MenuAction::SetSttMode(SttMode::Chunked))
         );
+        // effort
+        assert_eq!(
+            id_to_action("effort_balanced"),
+            Some(MenuAction::SetEffort(EffortPreset::Balanced))
+        );
+        assert_eq!(
+            id_to_action("effort_robust"),
+            Some(MenuAction::SetEffort(EffortPreset::Robust))
+        );
+        assert_eq!(
+            id_to_action("effort_high_quality"),
+            Some(MenuAction::SetEffort(EffortPreset::HighQuality))
+        );
         // i18n
         assert_eq!(
             id_to_action("ui_es"),
@@ -669,6 +815,7 @@ mod tests {
             id_to_action("prompt_custom"),
             Some(MenuAction::SetPromptPreset(PromptPreset::Custom))
         );
+        assert_eq!(id_to_action("prompt_edit"), Some(MenuAction::EditPrompt));
         assert_eq!(
             id_to_action("open_models_dir"),
             Some(MenuAction::OpenModelsDir)
@@ -705,6 +852,8 @@ mod tests {
             stt_mode: SttMode::Batch,
             prompt_preset: PromptPreset::BilingualEsEn,
             prompt_custom_text: String::new(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
         };
         default_sections(&ctx)
     }
@@ -715,8 +864,8 @@ mod tests {
         let sections = call_default(dir);
         assert_eq!(
             sections.len(),
-            7,
-            "7 secciones: hotkey, theme, mode, ui_language, prompt, models, exit"
+            8,
+            "8 secciones: hotkey, theme, mode, effort, ui_language, prompt, models, exit"
         );
         for s in &sections {
             assert!(
@@ -794,6 +943,8 @@ mod tests {
             stt_mode: SttMode::Batch,
             prompt_preset: PromptPreset::BilingualEsEn,
             prompt_custom_text: String::new(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
         };
         let sections = default_sections(&ctx);
         let sec = sections
@@ -836,6 +987,8 @@ mod tests {
             stt_mode: SttMode::Batch,
             prompt_preset: PromptPreset::Custom,
             prompt_custom_text: "Dictaré kubernetes, gRPC y WASM".into(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
         };
         let sections = default_sections(&ctx);
         let sec = sections.iter().find(|s| s.id() == "prompt").unwrap();
@@ -873,6 +1026,8 @@ mod tests {
             stt_mode: SttMode::Batch,
             prompt_preset: PromptPreset::BilingualEsEn,
             prompt_custom_text: String::new(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
         };
         let sections = default_sections(&ctx);
         let hotkey = sections.iter().find(|s| s.id() == "hotkey").unwrap();
@@ -927,6 +1082,68 @@ mod tests {
         );
     }
 
+    /// Con `model_lang_mismatch = None`, la sección de aviso no se añade
+    /// al árbol (consistente con el caso normal de los tests previos).
+    #[test]
+    fn mismatch_section_absent_when_none() {
+        let (_tmp, dir) = empty_models_dir();
+        let sections = call_default(dir);
+        assert!(
+            sections.iter().all(|s| s.id() != "model_lang_mismatch"),
+            "sin mismatch, no debe aparecer la sección de aviso"
+        );
+    }
+
+    /// Con `model_lang_mismatch = Some(filename)`, la sección aparece
+    /// **primero** en el árbol y renderiza un único item con id
+    /// canónico `fix_model_lang` cuyo label incluye el filename
+    /// sugerido.
+    #[test]
+    fn mismatch_section_present_and_first_when_active() {
+        let (_tmp, dir) = empty_models_dir();
+        let mut ctx = BuildContext {
+            models_dir: dir,
+            active_model: "ggml-small.en.bin".into(),
+            ui_language: UiLanguage::Es,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::BilingualEsEn,
+            prompt_custom_text: String::new(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
+        };
+        ctx.model_lang_mismatch = Some("ggml-small.bin".into());
+
+        let sections = default_sections(&ctx);
+        assert_eq!(sections.len(), 9, "8 base + 1 mismatch = 9");
+        assert_eq!(sections[0].id(), "model_lang_mismatch");
+
+        let items: Vec<MenuItemSpec> = sections[0]
+            .build()
+            .into_iter()
+            .filter_map(|s| match s {
+                Section::Item(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 1, "exactamente 1 item de aviso");
+        assert_eq!(items[0].id, "fix_model_lang");
+        assert!(
+            items[0].label.contains("ggml-small.bin"),
+            "label debe incluir el filename sugerido: {}",
+            items[0].label
+        );
+    }
+
+    /// `id_to_action` mapea `"fix_model_lang"` a `MenuAction::FixModelLanguage`.
+    #[test]
+    fn fix_model_lang_action_is_mapped() {
+        match id_to_action("fix_model_lang") {
+            Some(MenuAction::FixModelLanguage(_)) => {}
+            other => panic!("esperaba FixModelLanguage, obtuve {other:?}"),
+        }
+    }
+
     #[test]
     fn default_sections_cover_all_menu_actions() {
         let (_tmp, dir) = empty_models_dir();
@@ -955,6 +1172,9 @@ mod tests {
             "mode_batch",
             "mode_streaming",
             "mode_chunked",
+            "effort_balanced",
+            "effort_robust",
+            "effort_high_quality",
             "ui_es",
             "ui_en",
             "ui_bil",
@@ -962,6 +1182,7 @@ mod tests {
             "prompt_es",
             "prompt_en",
             "prompt_custom",
+            "prompt_edit",
             "open_models_dir",
             "check_updates",
             "exit",

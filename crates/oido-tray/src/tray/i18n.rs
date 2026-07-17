@@ -56,6 +56,8 @@ pub struct Strings {
     pub model_tiny: &'static str,
     pub model_base: &'static str,
     pub model_small: &'static str,
+    pub model_medium: &'static str,
+    pub model_large: &'static str,
     pub model_vad: &'static str,
     pub model_installed: &'static str, // prefijo "✓ "
     pub model_download: &'static str,  // prefijo "↓ Descargar "
@@ -75,6 +77,18 @@ pub struct Strings {
     pub prompt_en: &'static str,
     pub prompt_custom: &'static str,
     pub prompt_custom_hint: &'static str, // "--set-prompt" / ver CLI
+    pub prompt_edit: &'static str,        // "Editar config.json…" / "Edit config.json…"
+
+    // Submenú "Esfuerzo" / "Effort" (calidad de decodificación).
+    pub effort: &'static str,
+    pub effort_balanced: &'static str,
+    pub effort_robust: &'static str,
+    pub effort_high_quality: &'static str,
+
+    // Aviso no modal: modelo solo-inglés activo con idioma distinto a "en".
+    // Se muestra en tooltip del icono + como ítem de menú raíz "fix_model_lang".
+    pub model_lang_mismatch_tooltip: &'static str,
+    pub model_lang_mismatch_action: &'static str,
 }
 
 /// Selecciona la tabla de strings para el idioma de UI activo.
@@ -108,6 +122,8 @@ pub static STRINGS_ES: Strings = Strings {
     model_tiny: "Tiny",
     model_base: "Base",
     model_small: "Small",
+    model_medium: "Medium",
+    model_large: "Large",
     model_vad: "VAD",
     model_installed: "✓ ",
     model_download: "↓ Descargar ",
@@ -125,6 +141,15 @@ pub static STRINGS_ES: Strings = Strings {
     prompt_en: "Solo inglés",
     prompt_custom: "Personalizado…",
     prompt_custom_hint: "(edítalo con --set-prompt)",
+    prompt_edit: "Editar config.json…",
+
+    effort: "Esfuerzo de decodificación",
+    effort_balanced: "Equilibrado (greedy, 1×) — rápido · estable",
+    effort_robust: "Robusto (greedy best_of=5) — más lento, mejor con ruido",
+    effort_high_quality: "Alta calidad (beam search) — mucho más lento, mejor precisión",
+
+    model_lang_mismatch_tooltip: "oido — ⚠ modelo solo inglés con idioma español; ábreme para corregir",
+    model_lang_mismatch_action: "⚠ Cambiar a modelo multilingüe…",
 };
 
 /// Inglés puro.
@@ -148,6 +173,8 @@ pub static STRINGS_EN: Strings = Strings {
     model_tiny: "Tiny",
     model_base: "Base",
     model_small: "Small",
+    model_medium: "Medium",
+    model_large: "Large",
     model_vad: "VAD",
     model_installed: "✓ ",
     model_download: "↓ Download ",
@@ -165,6 +192,15 @@ pub static STRINGS_EN: Strings = Strings {
     prompt_en: "English only",
     prompt_custom: "Custom…",
     prompt_custom_hint: "(edit with --set-prompt)",
+    prompt_edit: "Edit config.json…",
+
+    effort: "Decoding effort",
+    effort_balanced: "Balanced (greedy, 1×) — fast · stable",
+    effort_robust: "Robust (greedy best_of=5) — slower, better with noise",
+    effort_high_quality: "High quality (beam search) — much slower, best accuracy",
+
+    model_lang_mismatch_tooltip: "oido — ⚠ English-only model with non-English language; open me to fix",
+    model_lang_mismatch_action: "⚠ Switch to multilingual model…",
 };
 
 /// Bilingüe: secciones críticas con ES + EN, resto en ES.
@@ -192,6 +228,8 @@ pub static STRINGS_BILINGUAL: Strings = Strings {
     model_tiny: "Tiny",
     model_base: "Base",
     model_small: "Small",
+    model_medium: "Medium",
+    model_large: "Large",
     model_vad: "VAD",
     model_installed: "✓ ",
     model_download: "↓ Descargar / Download ",
@@ -209,6 +247,15 @@ pub static STRINGS_BILINGUAL: Strings = Strings {
     prompt_en: "Solo inglés / English only",
     prompt_custom: "Personalizado / Custom…",
     prompt_custom_hint: "(edítalo con --set-prompt / edit with --set-prompt)",
+    prompt_edit: "Editar config.json / Edit config.json…",
+
+    effort: "Esfuerzo de decodificación / Decoding effort",
+    effort_balanced: "Equilibrado / Balanced (greedy, 1×) — rápido / fast · estable",
+    effort_robust: "Robusto (greedy best_of=5) — más lento / slower, mejor con ruido / with noise",
+    effort_high_quality: "Alta calidad / High quality (beam search) — mucho más lento / much slower, mejor precisión / best accuracy",
+
+    model_lang_mismatch_tooltip: "oido — ⚠ modelo solo inglés / English-only model; ábreme / open me",
+    model_lang_mismatch_action: "⚠ Cambiar a modelo multilingüe / Switch to multilingual model…",
 };
 
 #[cfg(test)]
@@ -280,6 +327,8 @@ mod tests {
                 ("model_tiny", t.model_tiny),
                 ("model_base", t.model_base),
                 ("model_small", t.model_small),
+                ("model_medium", t.model_medium),
+                ("model_large", t.model_large),
                 ("model_vad", t.model_vad),
                 ("model_installed", t.model_installed),
                 ("model_download", t.model_download),
@@ -295,6 +344,13 @@ mod tests {
                 ("prompt_en", t.prompt_en),
                 ("prompt_custom", t.prompt_custom),
                 ("prompt_custom_hint", t.prompt_custom_hint),
+                ("prompt_edit", t.prompt_edit),
+                ("effort", t.effort),
+                ("effort_balanced", t.effort_balanced),
+                ("effort_robust", t.effort_robust),
+                ("effort_high_quality", t.effort_high_quality),
+                ("model_lang_mismatch_tooltip", t.model_lang_mismatch_tooltip),
+                ("model_lang_mismatch_action", t.model_lang_mismatch_action),
             ];
             for (key, val) in s {
                 assert!(

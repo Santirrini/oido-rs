@@ -83,6 +83,11 @@ pub struct WhisperCpp {
     /// idioma de salida y reduce alucinaciones cuando el audio es
     /// ambiguo. `None` = no se pasa prompt (comportamiento legacy).
     system_prompt: Option<String>,
+    /// Preset de "esfuerzo" de decodificación. Se lee en cada
+    /// `transcribe()` para construir `FullParams` con la estrategia
+    /// de muestreo y los umbrales adecuados. Default = `Balanced`
+    /// (greedy best_of=1, comportamiento histórico).
+    effort: oido_config::EffortPreset,
 }
 
 impl Default for WhisperCpp {
@@ -94,6 +99,7 @@ impl Default for WhisperCpp {
             n_threads: detect_n_threads(),
             vad_model_path: None,
             system_prompt: None,
+            effort: oido_config::EffortPreset::Balanced,
         }
     }
 }
@@ -109,6 +115,7 @@ impl WhisperCpp {
             n_threads: detect_n_threads(),
             vad_model_path: None,
             system_prompt: None,
+            effort: oido_config::EffortPreset::Balanced,
         }
     }
 
@@ -118,6 +125,16 @@ impl WhisperCpp {
     pub fn with_runtime(mut self, gpu: GpuConfig, n_threads: u16) -> Self {
         self.gpu_config = gpu;
         self.n_threads = n_threads;
+        self
+    }
+
+    /// Configura el preset de esfuerzo de decodificación. Solo
+    /// afecta a los `FullParams` construidos dentro de `transcribe()`
+    /// / `transcribe_timed()`. No recarga el modelo. Ver
+    /// `set_effort` para el caso runtime (cambio desde menú).
+    #[must_use]
+    pub fn with_effort(mut self, preset: oido_config::EffortPreset) -> Self {
+        self.effort = preset;
         self
     }
 
@@ -153,6 +170,17 @@ impl WhisperCpp {
         self.system_prompt = if p.is_empty() { None } else { Some(p) };
     }
 
+    /// Setter runtime del preset de esfuerzo. NO recarga el modelo:
+    /// solo actualiza el campo `effort` que `build_*_params` lee en
+    /// cada llamada. La próxima transcripción (o el próximo proceso
+    /// de streaming) usará los nuevos parámetros. Igual que
+    /// `set_language` / `set_initial_prompt`, no es thread-safe con
+    /// una transcripción concurrente — `SharedTranscriber` lo
+    /// envuelve bajo un `parking_lot::Mutex` para hacerlo seguro.
+    pub fn set_effort(&mut self, preset: oido_config::EffortPreset) {
+        self.effort = preset;
+    }
+
     /// Activa el VAD nativo de whisper.cpp con el modelo Silero en
     /// formato GGML. Si el archivo no existe, whisper.cpp devolverá
     /// error al primer `transcribe()`; el bin debe descargar el modelo
@@ -177,14 +205,82 @@ fn detect_n_threads() -> u16 {
         .min(8)
 }
 
+/// Estructura con el output de aplicar un `EffortPreset` a `FullParams`.
+/// Los builders la consumen para fijar la estrategia de muestreo y los
+/// umbrales que dependen del esfuerzo. Se devuelve separado para que
+/// `build_base_params`/`build_streaming_params` decidan dónde aplicarlo
+/// (en `FullParams::new` la estrategia es **inmutable** post-construcción,
+/// así que necesitamos la `strategy` antes del `FullParams::new(...)`).
+pub(crate) struct EffortSettings {
+    pub strategy: SamplingStrategy,
+    pub temperature: f32,
+    pub temperature_inc: f32,
+    pub entropy_thold: f32,
+    /// `length_penalty` solo aplica a beam search. Para greedy lo
+    /// mantenemos en `None` (whisper-rs lo deja en su default 0.0 que
+    /// no afecta la estrategia greedy).
+    pub length_penalty: Option<f32>,
+}
+
+/// Mapea un `EffortPreset` a parámetros concretos de `whisper_full_params`.
+///
+/// Esto es el único sitio donde se decide el mapping entre UX
+/// (Balanced / Robust / HighQuality) y los knobs crudos de
+/// whisper.cpp. Si en el futuro queremos exponer más / menos presets,
+/// basta con cambiar esta función.
+pub(crate) fn preset_settings(preset: oido_config::EffortPreset) -> EffortSettings {
+    use oido_config::EffortPreset;
+    match preset {
+        // === Balanced ===
+        // Default histórico. Greedy best_of=1, sin fallback de
+        // temperatura, entropy_thold estándar. Velocidad 1×.
+        EffortPreset::Balanced => EffortSettings {
+            strategy: SamplingStrategy::Greedy { best_of: 1 },
+            temperature: 0.0,
+            temperature_inc: 0.0,
+            entropy_thold: 2.4,
+            length_penalty: None,
+        },
+        // === Robust ===
+        // Greedy best_of=5 + temperature_inc=0.2 (reintenta con
+        // temperaturas más altas si falla) + entropy_thold más estricto
+        // para descartar segmentos inseguros. ~1.5-2× más lento que
+        // Balanced pero más tolerante a audio ruidoso/ambiguo.
+        EffortPreset::Robust => EffortSettings {
+            strategy: SamplingStrategy::Greedy { best_of: 5 },
+            temperature: 0.0,
+            temperature_inc: 0.2,
+            entropy_thold: 1.8,
+            length_penalty: None,
+        },
+        // === HighQuality ===
+        // Beam search (beam_size=5, patience=-1.0 default),
+        // length_penalty negativa para premiar secuencias más largas y
+        // temperature_inc=0.2 para reintentos. Mejor calidad al coste
+        // de ~3-5× más CPU.
+        EffortPreset::HighQuality => EffortSettings {
+            strategy: SamplingStrategy::BeamSearch {
+                beam_size: 5,
+                patience: -1.0,
+            },
+            temperature: 0.0,
+            temperature_inc: 0.2,
+            entropy_thold: 1.8,
+            length_penalty: Some(-1.0),
+        },
+    }
+}
+
 pub(crate) fn build_base_params<'a>(
     language: Option<&'a str>,
     system_prompt: Option<&'a str>,
     n_threads: u16,
+    preset: oido_config::EffortPreset,
 ) -> FullParams<'a, 'a> {
-    // Greedy determinista: el más rápido y el más repetible. Para
-    // dictado interactivo no necesitamos beam search (5× más lento).
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    // El esfuerzo determina la `SamplingStrategy` que pasamos a
+    // `FullParams::new`. Ver `preset_settings` arriba.
+    let settings = preset_settings(preset);
+    let mut params = FullParams::new(settings.strategy);
 
     // === Throughput / paralelismo ===
     params.set_n_threads(n_threads as i32);
@@ -211,8 +307,12 @@ pub(crate) fn build_base_params<'a>(
     // === Anti-alucinación ===
     params.set_suppress_blank(true);
     params.set_suppress_nst(true);
-    params.set_temperature(0.0);
-    params.set_temperature_inc(0.0); // sin fallback de temperatura
+    // Temperature / temperature_inc / entropy_thold vienen del preset.
+    params.set_temperature(settings.temperature);
+    params.set_temperature_inc(settings.temperature_inc);
+    if let Some(lp) = settings.length_penalty {
+        params.set_length_penalty(lp);
+    }
                                      // NOTA: `set_max_len` mide CARACTERES por segmento (no tokens).
                                      // Activarlo fragmenta palabras a la mitad y degrada la salida.
                                      // La anti-alucinación real ya está cubierta por
@@ -235,8 +335,9 @@ pub(crate) fn build_base_params<'a>(
     // Sin timestamps a nivel de token (overhead innecesario).
     params.set_token_timestamps(false);
 
-    // Umbrales de confianza para mitigar alucinaciones y falsas detecciones en silencios
-    params.set_entropy_thold(2.4);
+    // Umbrales de confianza para mitigar alucinaciones y falsas detecciones en silencios.
+    // `entropy_thold` se ajusta según el preset (Balanced=2.4, Robust/HighQuality=1.8).
+    params.set_entropy_thold(settings.entropy_thold);
     params.set_logprob_thold(-1.0);
     // Nota: no_speech_thold puede no estar implementado completamente según la versión de whisper.cpp, pero se setea preventivamente.
     params.set_no_speech_thold(0.6);
@@ -254,8 +355,10 @@ pub(crate) fn build_streaming_params<'a>(
     language: Option<&'a str>,
     system_prompt: Option<&'a str>,
     n_threads: u16,
+    preset: oido_config::EffortPreset,
 ) -> FullParams<'a, 'a> {
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let settings = preset_settings(preset);
+    let mut params = FullParams::new(settings.strategy);
 
     params.set_n_threads(n_threads as i32);
 
@@ -275,8 +378,11 @@ pub(crate) fn build_streaming_params<'a>(
     // Anti-hallucination
     params.set_suppress_blank(true);
     params.set_suppress_nst(true);
-    params.set_temperature(0.0);
-    params.set_temperature_inc(0.0);
+    params.set_temperature(settings.temperature);
+    params.set_temperature_inc(settings.temperature_inc);
+    if let Some(lp) = settings.length_penalty {
+        params.set_length_penalty(lp);
+    }
 
     // Streaming-specific: allow natural segmentation to avoid
     // "single timestamp ending - skip entire chunk" seek loop.
@@ -284,8 +390,8 @@ pub(crate) fn build_streaming_params<'a>(
     params.set_no_context(true);
     params.set_token_timestamps(true);
 
-    // Confidence thresholds
-    params.set_entropy_thold(2.4);
+    // Confidence thresholds (mismo ajuste por preset que en base).
+    params.set_entropy_thold(settings.entropy_thold);
     params.set_logprob_thold(-1.0);
     params.set_no_speech_thold(0.6);
 
@@ -302,10 +408,11 @@ pub(crate) fn build_chunked_params<'a>(
     language: Option<&'a str>,
     system_prompt: Option<&'a str>,
     n_threads: u16,
+    preset: oido_config::EffortPreset,
 ) -> FullParams<'a, 'a> {
-    // Partimos del builder base (greedy, anti-alucinación, single_segment)
-    // y solo flipamos el flag de timestamps por token.
-    let mut params = build_base_params(language, system_prompt, n_threads);
+    // Partimos del builder base (greedy/beam según preset, anti-alucinación,
+    // single_segment) y solo flipamos el flag de timestamps por token.
+    let mut params = build_base_params(language, system_prompt, n_threads, preset);
     params.set_token_timestamps(true);
     params
 }
@@ -377,6 +484,7 @@ impl Transcriber for WhisperCpp {
             self.language.as_deref(),
             self.system_prompt.as_deref(),
             self.n_threads,
+            self.effort,
         );
 
         // `audio_ctx` son mel-frames reducidos por 2, donde
@@ -388,11 +496,11 @@ impl Transcriber for WhisperCpp {
         let ctx_frames = (((audio_secs + 2.0) * 50.0) as i32).clamp(100, 1500);
         params.set_audio_ctx(ctx_frames);
 
-        // Umbrales de confianza para mitigar alucinaciones y falsas detecciones en silencios
-        params.set_entropy_thold(2.4);
-        params.set_logprob_thold(-1.0);
-        // Nota: no_speech_thold puede no estar implementado completamente según la versión de whisper.cpp, pero se setea preventivamente.
-        params.set_no_speech_thold(0.6);
+        // NO sobrescribir umbrales aquí: `build_base_params` ya aplicó
+        // `set_entropy_thold(settings.entropy_thold)` y los constantes
+        // `logprob_thold=-1.0` y `no_speech_thold=0.6`. Machacarlos de
+        // vuelta borra el ajuste por preset (Robust/HighQuality usan
+        // entropy=1.8 en vez del 2.4 histórico).
 
         // === VAD nativo de whisper.cpp ===
         // Si se configuró un modelo Silero-VAD en formato GGML, lo
@@ -474,14 +582,16 @@ impl Transcriber for WhisperCpp {
             self.language.as_deref(),
             self.system_prompt.as_deref(),
             self.n_threads,
+            self.effort,
         );
 
         let audio_secs = audio.len() as f32 / 16_000.0;
         let ctx_frames = (((audio_secs + 2.0) * 50.0) as i32).clamp(100, 1500);
         params.set_audio_ctx(ctx_frames);
-        params.set_entropy_thold(2.4);
-        params.set_logprob_thold(-1.0);
-        params.set_no_speech_thold(0.6);
+
+        // NO sobrescribir umbrales aquí: `build_chunked_params` ya aplicó
+        // los valores según el preset (Robust/HighQuality usan
+        // entropy=1.8). Machacarlos de vuelta borra el ajuste del preset.
 
         // VAD nativo (mismo bloque que `transcribe`).
         if let Some(vad_path) = &self.vad_model_path {
@@ -613,6 +723,26 @@ impl Transcriber for WhisperCpp {
         if !model_path.exists() {
             return Err(SttError::ModelNotFound(model_path.to_path_buf()));
         }
+        // Defensa profunda: si por error el path apunta a un modelo VAD
+        // (p.ej. la `Config.model` quedó apuntando a `ggml-silero-v…bin`
+        // porque el usuario clickeó el item VAD del submenú "Modelos"),
+        // GGML_ASSERT(wtype != GGML_TYPE_COUNT) abortaría el proceso
+        // con STATUS_STACK_BUFFER_OVERRUN. Detectarlo aquí y devolver
+        // un error limpio para que el caller pueda recuperar (caer a
+        // un modelo válido, mostrar mensaje, etc.).
+        if let Some(name) = model_path.file_name().and_then(|s| s.to_str()) {
+            if crate::is_vad_model_filename(name) {
+                tracing::error!(
+                    path = ?model_path,
+                    "load_model rechazó un archivo VAD como modelo whisper; \
+                     el caller debe usar un modelo de transcripción (ggml-*.bin)"
+                );
+                return Err(SttError::ModelNotWhisper {
+                    path: model_path.to_path_buf(),
+                    kind: "VAD",
+                });
+            }
+        }
         let path_str = model_path
             .to_str()
             .ok_or_else(|| SttError::Backend(format!("path no UTF-8: {}", model_path.display())))?;
@@ -697,6 +827,62 @@ mod tests {
     fn detect_n_threads_is_capped_at_8() {
         let n = detect_n_threads();
         assert!((1..=8).contains(&n), "n_threads fuera de [1, 8]: {n}");
+    }
+
+    /// Regresión: los preset Robust/HighQuality deben cambiar el
+    /// umbral de entropía. Antes del fix, `transcribe` machacaba
+    /// `entropy_thold` a 2.4 después de pasar por el builder, así que
+    /// el ajuste por preset nunca llegaba al motor. Este test ejercita
+    /// la función pura `preset_settings` para fijar el contrato; el
+    /// call site en `transcribe`/`transcribe_timed` debe respetar esos
+    /// valores y NO sobrescribirlos.
+    #[test]
+    fn preset_settings_entropy_thold_matches_preset_tier() {
+        // Balanced = comportamiento histórico.
+        let s = preset_settings(oido_config::EffortPreset::Balanced);
+        assert!((s.entropy_thold - 2.4).abs() < f32::EPSILON);
+
+        // Robust y HighQuality son más estrictos con la entropía.
+        let s_robust = preset_settings(oido_config::EffortPreset::Robust);
+        assert!(
+            (s_robust.entropy_thold - 1.8).abs() < f32::EPSILON,
+            "Robust esperaba entropy=1.8, obtuve {}",
+            s_robust.entropy_thold
+        );
+        assert!(
+            (s_robust.temperature_inc - 0.2).abs() < f32::EPSILON,
+            "Robust esperaba temperature_inc=0.2, obtuve {}",
+            s_robust.temperature_inc
+        );
+
+        let s_hq = preset_settings(oido_config::EffortPreset::HighQuality);
+        assert!(
+            (s_hq.entropy_thold - 1.8).abs() < f32::EPSILON,
+            "HighQuality esperaba entropy=1.8, obtuve {}",
+            s_hq.entropy_thold
+        );
+        assert!(
+            s_hq.length_penalty.is_some(),
+            "HighQuality debe activar length_penalty"
+        );
+
+        // Balanced NO debe activar length_penalty (es cosa de beam).
+        assert!(s.length_penalty.is_none());
+    }
+
+    /// Regresión: `WhisperCpp::set_effort` debe actualizar el campo
+    /// `effort` que `transcribe` lee. Sin este setter, el cambio desde
+    /// el menú no llegaba al motor aunque la config estuviera bien.
+    #[test]
+    fn whisper_cpp_set_effort_updates_internal_state() {
+        let mut stt = WhisperCpp::default();
+        assert_eq!(stt.effort, oido_config::EffortPreset::Balanced);
+
+        stt.set_effort(oido_config::EffortPreset::Robust);
+        assert_eq!(stt.effort, oido_config::EffortPreset::Robust);
+
+        stt.set_effort(oido_config::EffortPreset::HighQuality);
+        assert_eq!(stt.effort, oido_config::EffortPreset::HighQuality);
     }
 
     #[test]

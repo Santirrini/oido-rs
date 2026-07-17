@@ -2994,6 +2994,8 @@ dependencies = [
  "oido-tray",
  "oido-updater",
  "open",
+ "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.59.0",
@@ -3079,6 +3081,7 @@ dependencies = [
 name = "oido-stt"
 version = "0.1.0"
 dependencies = [
+ "oido-config",
  "parking_lot",
  "thiserror 1.0.69",
  "tracing",
