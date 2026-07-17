@@ -68,7 +68,7 @@ use parking_lot::Mutex;
 use oido_audio::{AudioRx, AudioTx, CaptureSource, Resampler};
 use oido_hotkey::Hotkey;
 use oido_input::Injector;
-use oido_stt::{Transcriber, WordTimings};
+use oido_stt::{SttError, Transcriber, WordTimings};
 
 use crate::phrase_filter;
 
@@ -376,6 +376,25 @@ fn process_chunk(
         let _span = tracing::info_span!("chunked.infer").entered();
         match transcriber.transcribe_timed(&chunk, max_samples) {
             Ok(t) => t,
+            Err(SttError::AudioTooShort(n)) => {
+                // El resto final al soltar la tecla puede ser más corto que
+                // el mínimo de whisper (4800 muestras / 300 ms): es perfectamente
+                // normal — el usuario suelta cuando quiere. NO es un error de
+                // inferencia, así que descartamos el chunk en silencio (info +
+                // Idle) en vez de emitir un flash rojo `Error`.
+                //
+                // Los chunks intermedios siempre miden `chunk_size` exacto
+                // (muy por encima del mínimo), así que cualquier AudioTooShort
+                // solo puede venir del resto final o de un edge case donde no
+                // hay audio útil que transcribir.
+                tracing::info!(
+                    samples = n,
+                    audio_seconds,
+                    "chunk descartado: resto final menor al mínimo de whisper"
+                );
+                let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
+                return;
+            }
             Err(e) => {
                 tracing::error!(?e, samples, audio_seconds, "STT falló en chunked");
                 let _ = event_tx.send(PipelineEvent::State(PipelineState::Error));
