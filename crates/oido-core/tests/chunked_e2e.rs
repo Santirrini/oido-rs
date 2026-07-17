@@ -179,6 +179,9 @@ impl Hotkey for MockHotkey {
 struct MockTimedTranscriberInner {
     call_count: AtomicUsize,
     fail: AtomicBool,
+    /// Cuando está activo, `transcribe_timed` devuelve `AudioTooShort`
+    /// simulando el resto final más corto que el mínimo de whisper.
+    fail_too_short: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -203,6 +206,7 @@ impl MockTimedTranscriber {
             inner: Arc::new(MockTimedTranscriberInner {
                 call_count: AtomicUsize::new(0),
                 fail: AtomicBool::new(false),
+                fail_too_short: AtomicBool::new(false),
             }),
         }
     }
@@ -221,6 +225,9 @@ impl MockTimedTranscriberHandle {
     fn set_fail(&self, fail: bool) {
         self.inner.fail.store(fail, Ordering::SeqCst);
     }
+    fn set_fail_too_short(&self, fail: bool) {
+        self.inner.fail_too_short.store(fail, Ordering::SeqCst);
+    }
 }
 
 impl Transcriber for MockTimedTranscriber {
@@ -231,6 +238,9 @@ impl Transcriber for MockTimedTranscriber {
     fn transcribe_timed(&self, audio: &[f32], max_samples: usize) -> Result<WordTimings, SttError> {
         if self.inner.fail.load(Ordering::SeqCst) {
             return Err(SttError::Backend("mock failure".into()));
+        }
+        if self.inner.fail_too_short.load(Ordering::SeqCst) {
+            return Err(SttError::AudioTooShort(audio.len()));
         }
         let n = self.inner.call_count.fetch_add(1, Ordering::SeqCst) + 1;
         // Texto numerado para distinguir cada bloque en el injector.
@@ -520,6 +530,71 @@ fn chunked_stt_failure_emits_error_and_continues() {
         !rig.injector.texts().is_empty(),
         "tras recuperar de un fallo, el siguiente bloque debe inyectarse; obtuve {:?}",
         rig.injector.texts()
+    );
+
+    rig.pipeline.shutdown().ok();
+}
+
+/// El resto final al soltar la tecla puede ser más corto que el mínimo de
+/// whisper (4800 muestras / 300 ms). Eso NO es un error de inferencia — el
+/// usuario simplemente soltó cuando quiso —, así que el pipeline debe
+/// descartarlo en silencio (Idle) sin emitir un flash rojo `Error`.
+///
+/// Simulamos el escenario real: un chunk completo transcrito OK y luego un
+/// resto final que devuelve `AudioTooShort`. Verificamos que el primer chunk
+/// se inyecta y que no aparece `Error` en ningún momento.
+#[test]
+fn chunked_short_remainder_does_not_emit_error() {
+    // chunk_secs=1.0 → chunk_size=16.000 (1s). Enviamos 2s: llena un chunk
+    // completo y queda un remainder de ~1s que el mock hará fallar con
+    // AudioTooShort simulando que era < 4800 muestras.
+    let mut rig = make_chunked_rig(1.0);
+
+    rig.hotkey.press();
+    let _ = wait_for_state(
+        &rig.events,
+        PipelineState::Recording,
+        Duration::from_millis(200),
+    );
+
+    // Primer chunk: se transcribe OK.
+    send_silence_and_drain(&rig, 1000);
+
+    // El resto final devolverá AudioTooShort.
+    rig.transcriber.set_fail_too_short(true);
+    send_silence_and_drain(&rig, 1000);
+
+    rig.hotkey.release();
+
+    // Recolectamos todos los estados durante un tiempo prudencial.
+    let mut saw_error = false;
+    let mut saw_idle_after_remainder = false;
+    let deadline = std::time::Instant::now() + Duration::from_millis(1000);
+    while std::time::Instant::now() < deadline {
+        match rig.events.recv_timeout(Duration::from_millis(20)) {
+            Ok(PipelineEvent::State(PipelineState::Error)) => saw_error = true,
+            Ok(PipelineEvent::State(PipelineState::Idle)) => saw_idle_after_remainder = true,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        !saw_error,
+        "un resto final AudioTooShort no debe emitir Error; el resto corto es esperable"
+    );
+    assert!(
+        saw_idle_after_remainder,
+        "el pipeline debió volver a Idle tras descartar el resto final"
+    );
+
+    // El primer chunk sí se inyectó.
+    let texts = rig.injector.texts();
+    assert_eq!(
+        texts.len(),
+        1,
+        "el primer chunk (no corto) debe inyectarse; obtuve {:?}",
+        texts
     );
 
     rig.pipeline.shutdown().ok();
