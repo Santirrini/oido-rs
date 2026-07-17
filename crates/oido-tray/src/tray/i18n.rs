@@ -100,9 +100,9 @@ pub static STRINGS_ES: Strings = Strings {
     theme_system: "Sistema",
 
     mode: "Modo de dictado",
-    mode_batch: "Batch (Hold-to-Talk)",
-    mode_streaming: "Streaming (En vivo)",
-    mode_chunked: "Chunked (Por bloques)",
+    mode_batch: "Batch (Hold-to-Talk) · estable",
+    mode_streaming: "Streaming (En vivo) · en prueba",
+    mode_chunked: "Chunked (Por bloques) · en prueba",
 
     models: "Modelos",
     model_tiny: "Tiny",
@@ -140,9 +140,9 @@ pub static STRINGS_EN: Strings = Strings {
     theme_system: "System",
 
     mode: "Dictation mode",
-    mode_batch: "Batch (Hold-to-Talk)",
-    mode_streaming: "Streaming (Live)",
-    mode_chunked: "Chunked (Blocks)",
+    mode_batch: "Batch (Hold-to-Talk) · stable",
+    mode_streaming: "Streaming (Live) · in testing",
+    mode_chunked: "Chunked (Blocks) · in testing",
 
     models: "Models",
     model_tiny: "Tiny",
@@ -184,9 +184,9 @@ pub static STRINGS_BILINGUAL: Strings = Strings {
     theme_system: "Sistema / System",
 
     mode: "Modo de dictado / Dictation mode",
-    mode_batch: "Batch (Hold-to-Talk)",
-    mode_streaming: "Streaming (En vivo / Live)",
-    mode_chunked: "Chunked (Por bloques / Blocks)",
+    mode_batch: "Batch (Hold-to-Talk) · estable / stable",
+    mode_streaming: "Streaming (En vivo / Live) · en prueba",
+    mode_chunked: "Chunked (Por bloques / Blocks) · en prueba",
 
     models: "Modelos / Models",
     model_tiny: "Tiny",
