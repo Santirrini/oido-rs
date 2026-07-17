@@ -206,24 +206,6 @@ impl CaptureSource for CpalCapture {
     }
 }
 
-impl Default for CpalCapture {
-    fn default() -> Self {
-        Self {
-            device: cpal::default_host()
-                .default_input_device()
-                .expect("sin dispositivo"),
-            stream_config: cpal::StreamConfig {
-                channels: 1,
-                sample_rate: 16_000,
-                buffer_size: cpal::BufferSize::Default,
-            },
-            sample_format: cpal::SampleFormat::F32,
-            sample_rate: 16_000,
-            sink: None,
-            stream: None,
-        }
-    }
-}
 
 // =========================================================================
 // Resampler: vive en `oido-core` (donde tiene estado entre frames). Lo

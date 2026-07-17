@@ -38,3 +38,10 @@ installer/dist/
 *.msi
 *.wixobj
 *.wixpdb
+
+# Test audio and data files
+*.mp3
+*.wav
+*.bin
+*.npy
+

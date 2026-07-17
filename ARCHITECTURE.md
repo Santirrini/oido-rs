@@ -19,7 +19,7 @@ viola, el PR se cierra sin discusión hasta reformular.
 
 - `crossbeam::channel` para el camino síncrono (audio → stt → filtro).
 - `tokio::sync::mpsc` para async (UI / comandos Tauri).
-- **Prohibido** `Arc<Mutex<T>>` o `Arc<RwLock<T>>` fuera de `oido-config`.
+- **Prohibido** `Arc<Mutex<T>>` o `Arc<RwLock<T>>` fuera de `oido-config`, con la única excepción autorizada de `Arc<Mutex<BufferState>>` en `oido-core` (necesaria para acumular las muestras de audio desde el callback de captura de `cpal` y sincronizarlo con el ciclo de vida del pipeline).
 - Cada etapa posee su estado. La composición es `Sender → Receiver` entre
   threads workers.
 - Si descubres que necesitas estado compartido, el problema está mal

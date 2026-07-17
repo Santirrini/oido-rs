@@ -219,7 +219,7 @@ impl Injector for RecordingInjector {
 
 // ----- Cargar audio -----
 
-fn load_audio_bin(path: &PathBuf) -> Vec<f32> {
+fn load_audio_bin(path: &std::path::Path) -> Vec<f32> {
     let bytes = std::fs::read(path).expect("no se pudo leer audio_16k.bin");
     assert!(
         bytes.len() % 4 == 0,
@@ -234,7 +234,7 @@ fn load_audio_bin(path: &PathBuf) -> Vec<f32> {
     audio
 }
 
-fn load_whisper(model_path: &PathBuf) -> Arc<SharedTranscriber> {
+fn load_whisper(model_path: &std::path::Path) -> Arc<SharedTranscriber> {
     let mut stt = WhisperCpp::with_language("es");
     stt.load_model(model_path).expect("cargar modelo whisper");
     let _ = stt.warm_up();
