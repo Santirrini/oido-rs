@@ -1,0 +1,1 @@
+Ejecutar el plan presentado: rama feat/effort-preset con EffortPreset (Balanced/Robust/HighQuality), propagación hot-reload desde menú hasta SharedTranscriber.set_effort.
