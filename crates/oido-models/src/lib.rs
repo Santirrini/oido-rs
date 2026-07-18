@@ -27,11 +27,21 @@ use thiserror::Error;
 use tracing::{info, info_span, warn};
 
 /// Familia del modelo (define el submenú y el orden de presentación).
+///
+/// El orden de las variantes importa: el test
+/// `catalog_groups_by_family_in_stable_order` exige que `CATALOG` esté
+/// ordenado de menor a mayor según el `Ord` derivado. Por tanto el
+/// orden natural es: Tiny < Base < Small < Medium < Large < Vad.
+/// `Vad` se mantiene al final (no es realmente una familia de
+/// transcripción) para preservar el comportamiento de los tests
+/// anteriores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModelFamily {
     Tiny,
     Base,
     Small,
+    Medium,
+    Large,
     Vad,
 }
 
@@ -78,6 +88,40 @@ pub fn find(filename: &str) -> Option<&'static ModelEntry> {
     LazyLock::force(&CATALOG)
         .iter()
         .find(|e| e.filename == filename)
+}
+
+/// `true` si el filename del catálogo corresponde a un modelo fine-tuneado
+/// solo para inglés (sufijo `.en.bin`). Si el filename no está en el
+/// catálogo, caemos a la heurística de sufijo como fallback defensivo
+/// (modelos externos aún no catalogados).
+///
+/// Esta función centraliza la decisión de "es un modelo solo-inglés" que
+/// antes vivía inline en varios call sites (submenú Modelos, aviso de
+/// mismatch modelo/idioma, etc.) para que cualquier heurística nueva
+/// (p.ej. derivar de la URL en vez del filename) se haga en un único
+/// lugar.
+pub fn is_english_only_model(filename: &str) -> bool {
+    match find(filename) {
+        Some(entry) => entry.language == Language::En,
+        None => filename.ends_with(".en.bin"),
+    }
+}
+
+/// Dado un modelo solo-inglés del catálogo (p.ej. `ggml-small.en.bin`),
+/// devuelve el entry multilingüe equivalente de la misma familia
+/// (`ggml-small.bin`). Devuelve `None` si el input no es `.en`, no está
+/// en el catálogo, o no tiene contraparte multilingüe catalogada.
+///
+/// Se usa para sugerirle al usuario el reemplazo correcto cuando
+/// detecta el mismatch "modelo `.en` + idioma != en".
+pub fn multilingual_counterpart(filename: &str) -> Option<&'static ModelEntry> {
+    let entry = find(filename)?;
+    if entry.language != Language::En {
+        return None;
+    }
+    LazyLock::force(&CATALOG)
+        .iter()
+        .find(|e| e.family == entry.family && e.language == Language::Multi)
 }
 
 /// Lista los filenames del catálogo que están presentes en `models_dir`.
@@ -263,6 +307,72 @@ static CATALOG: LazyLock<Vec<ModelEntry>> = LazyLock::new(|| {
             language: Language::Multi,
         },
         ModelEntry {
+            filename: String::from("ggml-medium.en.bin"),
+            size_bytes: 1_533_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-medium.en.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Medium,
+            language: Language::En,
+        },
+        ModelEntry {
+            filename: String::from("ggml-medium.bin"),
+            size_bytes: 1_533_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-medium.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Medium,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-large-v1.bin"),
+            size_bytes: 3_092_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-large-v1.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Large,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-large-v2.bin"),
+            size_bytes: 3_092_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-large-v2.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Large,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-large-v3.bin"),
+            size_bytes: 3_092_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-large-v3.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Large,
+            language: Language::Multi,
+        },
+        ModelEntry {
+            filename: String::from("ggml-large-v3-turbo.bin"),
+            size_bytes: 1_621_000_000,
+            url: String::from(concat!(
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+                "/ggml-large-v3-turbo.bin"
+            )),
+            sha256: String::new(),
+            family: ModelFamily::Large,
+            language: Language::Multi,
+        },
+        ModelEntry {
             filename: String::from("ggml-silero-v5.1.2.bin"),
             size_bytes: 885_098,
             url: String::from(concat!(
@@ -315,7 +425,12 @@ mod tests {
     #[test]
     fn catalog_is_non_empty_and_unique_filenames() {
         let cat = catalog();
-        assert!(cat.len() >= 4, "catálogo debe tener al menos 4 modelos");
+        // 6 (Tiny/Base/Small × .en + multi) + Medium × 2 + Large × 4 + VAD = 13.
+        assert!(
+            cat.len() >= 4,
+            "catálogo debe tener al menos 4 modelos (actual: {})",
+            cat.len()
+        );
         let mut seen = std::collections::HashSet::new();
         for e in cat {
             assert!(
@@ -339,6 +454,54 @@ mod tests {
     fn find_returns_none_for_unknown() {
         assert!(find("nope.bin").is_none());
         assert!(find("ggml-base.bin").is_some());
+    }
+
+    #[test]
+    fn is_english_only_recognizes_catalog_entries() {
+        // Variantes `.en` → true
+        assert!(is_english_only_model("ggml-tiny.en.bin"));
+        assert!(is_english_only_model("ggml-base.en.bin"));
+        assert!(is_english_only_model("ggml-small.en.bin"));
+        assert!(is_english_only_model("ggml-medium.en.bin"));
+        // Variantes multilingües → false
+        assert!(!is_english_only_model("ggml-tiny.bin"));
+        assert!(!is_english_only_model("ggml-base.bin"));
+        assert!(!is_english_only_model("ggml-small.bin"));
+        assert!(!is_english_only_model("ggml-medium.bin"));
+        // Large existe solo en multilingüe → false
+        assert!(!is_english_only_model("ggml-large-v3-turbo.bin"));
+        // VAD → false
+        assert!(!is_english_only_model("ggml-silero-v5.1.2.bin"));
+        // Desconocido: fallback heurístico defensivo
+        assert!(is_english_only_model("ggml-custom.en.bin"));
+        assert!(!is_english_only_model("ggml-custom.bin"));
+    }
+
+    #[test]
+    fn multilingual_counterpart_maps_en_to_multi_in_same_family() {
+        let cp = multilingual_counterpart("ggml-small.en.bin").expect("debe existir");
+        assert_eq!(cp.filename, "ggml-small.bin");
+        assert_eq!(cp.family, ModelFamily::Small);
+        assert_eq!(cp.language, Language::Multi);
+
+        assert_eq!(
+            multilingual_counterpart("ggml-tiny.en.bin").unwrap().filename,
+            "ggml-tiny.bin"
+        );
+        assert_eq!(
+            multilingual_counterpart("ggml-base.en.bin").unwrap().filename,
+            "ggml-base.bin"
+        );
+        assert_eq!(
+            multilingual_counterpart("ggml-medium.en.bin").unwrap().filename,
+            "ggml-medium.bin"
+        );
+
+        // Entradas no-`.en` o no catalogadas → None
+        assert!(multilingual_counterpart("ggml-small.bin").is_none());
+        assert!(multilingual_counterpart("ggml-base.en.bin").is_some());
+        assert!(multilingual_counterpart("ggml-silero-v5.1.2.bin").is_none());
+        assert!(multilingual_counterpart("nope.bin").is_none());
     }
 
     #[test]

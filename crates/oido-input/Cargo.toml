@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Inyección de texto al SO (clipboard + paste simulado). 100% Safe Rust."
+description = "Inyección de texto al SO (direct UIAutomation + clipboard fallback). 100% Safe Rust."
 
 [lints]
 workspace = true
@@ -15,3 +15,11 @@ thiserror.workspace = true
 parking_lot.workspace = true
 arboard.workspace = true
 enigo.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Backend de accesibilidad Windows. El unsafe vive dentro del crate; este
+# wrapper permanece 100% safe. Solo se usa dentro del worker `oido-uia-worker`
+# dedicado (los tipos UIAutomation/UIElement del crate son !Send + !Sync).
+uiautomation.workspace = true

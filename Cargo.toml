@@ -87,6 +87,10 @@ whisper-rs = "0.16"
 # Resampling de audio (CpalCapture puede recibir audio a 44.1/48kHz y
 # debe entregar 16kHz mono a whisper.cpp).
 rubato = "0.15"
+# Backend de accesibilidad Windows para inyección directa sin portapapeles
+# (UIAutomation). El unsafe vive internamente en el crate; nuestro código
+# permanece 100% safe Rust. Solo se usa en target_os = "windows".
+uiautomation = "0.25"
 
 # Stage lock: every member inherits MSRV pinned via workspace.package above.
 

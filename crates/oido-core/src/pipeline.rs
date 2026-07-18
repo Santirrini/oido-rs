@@ -204,6 +204,13 @@ impl Pipeline {
                     } else {
                         frame.samples
                     };
+                    // ponytail: dump de diagnóstico sólo si
+                    // OIDO_DEBUG_PCM_DUMP está seteada. Cero costo en
+                    // producción (pcm_dumper() retorna None sin tocar la
+                    // env después del primer call cacheado en OnceLock).
+                    if let Some(d) = crate::debug_dump::pcm_dumper() {
+                        d.write(&samples);
+                    }
                     s.samples.extend(samples);
                 }
             })?;
@@ -326,6 +333,28 @@ fn process_one(
 ) {
     let samples = buffer.len();
     let audio_seconds = samples as f64 / 16_000.0;
+
+    // === Diagnóstico de señal (siempre-on, barato) ===
+    // Stats de nivel del buffer completo: RMS en dBFS, pico, % de
+    // casi-ceros. Un RMS < -45 dBFS indica señal débil (mic lejos/bajo),
+    // causa común de alucinaciones de whisper. Loguearlo junto al
+    // resultado de STT nos deja correlacionar "transcripción mala"
+    // con "señal mala" sin correr un protocolo aparte.
+    let stats = crate::debug_dump::analyze(&buffer);
+    tracing::info!(
+        samples,
+        audio_seconds,
+        rms_dbfs = format!("{:.1}", stats.rms_dbfs),
+        peak_dbfs = format!("{:.1}", stats.peak_dbfs),
+        near_zero_frac = format!("{:.2}", stats.near_zero_frac),
+        "audio dictado (nivel de señal)"
+    );
+    // Dump WAV del dictado completo si OIDO_DEBUG_WAV_DIR está seteada:
+    // guarda `dictado-NNN.wav` para escuchar EXACTAMENTE lo que whisper
+    // recibió (distingue "audio malo" de "modelo malo").
+    if let Some(w) = crate::debug_dump::wav_dumper() {
+        w.write_dictation(&buffer);
+    }
 
     // STT. Bloquea (whisper.cpp es CPU/GPU-bound).
     let started = Instant::now();

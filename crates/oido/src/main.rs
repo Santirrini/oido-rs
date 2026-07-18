@@ -12,7 +12,7 @@ use oido_audio::CpalCapture;
 use oido_config::{Config, ConfigStore, Theme};
 use oido_core::{Pipeline, PipelineConfig, PipelineEvent, PipelineState};
 use oido_hotkey::{parse as parse_hotkey, GatedHotkey, Hotkey};
-use oido_input::ArboardInjector;
+use oido_input::{ArboardInjector, DirectInjector, SmartInjector};
 use oido_stt::{GpuConfig, SharedTranscriber, Transcriber, WhisperCpp};
 use oido_tray::{
     default_sections, enable_dpi_awareness, BuildContext, MenuAction, PlatformTray, Tray, TrayState,
@@ -613,7 +613,23 @@ fn main() -> Result<()> {
         // dentro del pipeline. La `mut` es necesaria para el `register`
         // interno que `Pipeline::start` invocará después.
         let hotkey: Box<dyn Hotkey> = Box::new(gated);
-        let injector = ArboardInjector::new().context("init injector clipboard")?;
+        let clipboard = ArboardInjector::new().context("init injector clipboard")?;
+        // Cadena de inyección: UIAutomation (Windows-only, respeta el caret)
+        // con fallback transparente a clipboard+Ctrl+V. En macOS/Linux el
+        // backend stub devuelve Unsupported y caemos directo al fallback.
+        let direct: Option<Arc<dyn DirectInjector>> =
+            match oido_input::UiaDirectInjector::new() {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        "UIA direct injector no inicializado; solo clipboard",
+                    );
+                    None
+                }
+            };
+        let injector: Arc<dyn oido_input::Injector> =
+            Arc::new(SmartInjector::new(direct, clipboard));
 
         let mut active_pipe = match mode {
             oido_config::SttMode::Batch => {

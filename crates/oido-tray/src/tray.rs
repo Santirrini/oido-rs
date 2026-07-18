@@ -107,6 +107,9 @@ impl Tray for PlatformTray {
     fn set_state(&mut self, state: TrayState, theme: Theme) -> Result<(), TrayError> {
         self.0.set_state(state, theme)
     }
+    fn set_tooltip(&mut self, tooltip: &str) -> Result<(), TrayError> {
+        self.0.set_tooltip(tooltip)
+    }
     fn hide(&mut self) -> Result<(), TrayError> {
         self.0.hide()
     }
@@ -177,6 +180,10 @@ impl Tray for LinuxTray {
         self.current_state = state;
         self.current_theme = theme;
         tracing::info!(?state, "tray Linux state");
+        Ok(())
+    }
+    fn set_tooltip(&mut self, tooltip: &str) -> Result<(), TrayError> {
+        tracing::info!(tooltip, "tray Linux (ksni): set_tooltip (stub)");
         Ok(())
     }
     fn hide(&mut self) -> Result<(), TrayError> {
@@ -267,6 +274,11 @@ impl Tray for MacTray {
             .map_err(|e| TrayError::Tray(e.to_string()))?;
         Ok(())
     }
+    fn set_tooltip(&mut self, tooltip: &str) -> Result<(), TrayError> {
+        self.icon
+            .set_tooltip(Some(tooltip.to_string()))
+            .map_err(|e| TrayError::Tray(e.to_string()))
+    }
     fn hide(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
@@ -356,6 +368,11 @@ impl Tray for WindowsTray {
             .map_err(|e| TrayError::Tray(e.to_string()))?;
         Ok(())
     }
+    fn set_tooltip(&mut self, tooltip: &str) -> Result<(), TrayError> {
+        self.icon
+            .set_tooltip(Some(tooltip.to_string()))
+            .map_err(|e| TrayError::Tray(e.to_string()))
+    }
     fn hide(&mut self) -> Result<(), TrayError> {
         Ok(())
     }
@@ -394,6 +411,17 @@ fn state_tooltip(state: TrayState) -> String {
         TrayState::Error => "oido — error".into(),
         TrayState::Loading => "oido — cargando modelo…".into(),
     }
+}
+
+/// Tooltip de aviso cuando hay mismatch modelo/idioma. Se usa en lugar
+/// del tooltip de estado para que el mensaje sea bien visible. El
+/// icono sigue reflejando el estado operativo (Loading / Idle / …)
+/// vía `set_state`; el tooltip es ortogonal.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn mismatch_tooltip(ui_language: oido_config::UiLanguage) -> String {
+    self::i18n::strings(ui_language)
+        .model_lang_mismatch_tooltip
+        .to_string()
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]

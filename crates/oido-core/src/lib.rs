@@ -8,6 +8,8 @@
 //!
 //! Arquitectura detallada: [`ARCHITECTURE.md`](https://github.com/Santirrini/oido-rs/blob/main/ARCHITECTURE.md).
 
+mod debug_dump;
+
 pub mod chunked_pipeline;
 pub mod dedup;
 pub mod phrase_filter;
