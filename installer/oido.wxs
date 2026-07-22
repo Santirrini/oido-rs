@@ -17,26 +17,23 @@
     </Directory>
 
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="OidoExecutable" Guid="84C3F01E-9C3E-4B07-A532-D1AA0A6FF6CE" KeyPath="yes">
+      <Component Id="OidoExecutable" Guid="84C3F01E-9C3E-4B07-A532-D1AA0A6FF6CE">
         <File Id="OidoExe" Source="staging\oido.exe" />
-        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
-      </Component>
-    </DirectoryRef>
-
-    <DirectoryRef Id="ProgramMenuFolder">
-      <Component Id="ApplicationShortcut" Guid="761A4EBA-C3A5-42AF-B3BE-8D4C06A911BD">
         <Shortcut Id="ApplicationStartMenuShortcut"
                   Name="Oido"
                   Description="Local-first voice dictation"
+                  Directory="ProgramMenuFolder"
                   Target="[INSTALLFOLDER]oido.exe"
                   WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue Root="HKCU" Key="Software\Oido" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFile Id="RemoveOidoExe" Name="oido.exe" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
       </Component>
     </DirectoryRef>
 
     <Feature Id="ProductFeature" Title="Oido" Level="1">
       <ComponentRef Id="OidoExecutable" />
-      <ComponentRef Id="ApplicationShortcut" />
     </Feature>
 
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
