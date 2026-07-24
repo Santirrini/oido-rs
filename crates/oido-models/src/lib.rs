@@ -485,15 +485,21 @@ mod tests {
         assert_eq!(cp.language, Language::Multi);
 
         assert_eq!(
-            multilingual_counterpart("ggml-tiny.en.bin").unwrap().filename,
+            multilingual_counterpart("ggml-tiny.en.bin")
+                .unwrap()
+                .filename,
             "ggml-tiny.bin"
         );
         assert_eq!(
-            multilingual_counterpart("ggml-base.en.bin").unwrap().filename,
+            multilingual_counterpart("ggml-base.en.bin")
+                .unwrap()
+                .filename,
             "ggml-base.bin"
         );
         assert_eq!(
-            multilingual_counterpart("ggml-medium.en.bin").unwrap().filename,
+            multilingual_counterpart("ggml-medium.en.bin")
+                .unwrap()
+                .filename,
             "ggml-medium.bin"
         );
 

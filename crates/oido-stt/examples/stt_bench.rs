@@ -47,7 +47,8 @@ fn main() {
         stt = stt.with_runtime(GpuConfig::default(), n_threads);
     }
     let t0 = Instant::now();
-    stt.load_model(std::path::Path::new(&model)).expect("load_model");
+    stt.load_model(std::path::Path::new(&model))
+        .expect("load_model");
     println!("load_model: {:?}", t0.elapsed());
 
     let t0 = Instant::now();

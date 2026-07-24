@@ -32,7 +32,10 @@ pub enum SttError {
     /// fallar el assert). Ver `crate::is_vad_model_filename` para
     /// la heurística de detección.
     #[error("archivo no es un modelo whisper válido (parece ser {kind}): {path}")]
-    ModelNotWhisper { path: std::path::PathBuf, kind: &'static str },
+    ModelNotWhisper {
+        path: std::path::PathBuf,
+        kind: &'static str,
+    },
     #[error("buffer de audio demasiado corto: {0} samples")]
     AudioTooShort(usize),
     #[error("backend whisper devolvió error: {0}")]
@@ -54,7 +57,7 @@ pub fn is_vad_model_filename(filename: &str) -> bool {
         || lower.contains("-vad-")
         || lower.contains("-vad.bin")
         || (lower.contains("vad") && lower.ends_with(".bin") && !lower.starts_with("ggml-"))
-            // el último caso es defensivo, p.ej. `silero-vad-v5.bin`
+    // el último caso es defensivo, p.ej. `silero-vad-v5.bin`
 }
 
 /// Resultado de una transcripción con información de timestamps por
