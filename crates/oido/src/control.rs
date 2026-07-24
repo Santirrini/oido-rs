@@ -35,4 +35,15 @@ pub(crate) enum ControlMessage {
     /// Activa un modelo descargado (filename) en el transcriber activo.
     /// Idempotente; el bin ya reemplaza el modelo en el SharedTranscriber.
     ActivateModel(String),
+    /// Click sobre un dispositivo del submenú "Micrófono" o un valor
+    /// del flag `--set-mic`. `None` = modo automático (default del OS);
+    /// `Some(name)` = fijado al dispositivo con ese nombre exacto.
+    /// El handler reconstruye el `CaptureSource` (shut down + start
+    /// pipeline, sin recargar modelo).
+    SetInputDevice(Option<String>),
+    /// Click sobre el item "Re-probar micrófonos" del submenú. El
+    /// handler lanza el sondeo de calidad en un thread dedicado
+    /// (`oido-mic-probe`) y, si encuentra un dispositivo con mejor
+    /// señal, envía un `SetInputDevice` por el canal de control.
+    ProbeMicrophones,
 }

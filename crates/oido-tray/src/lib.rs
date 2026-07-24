@@ -28,9 +28,9 @@ pub mod win_helper;
 pub use dialog::show_model_prompt_windows;
 pub use dialog::show_prompt_editor_windows;
 pub use traits::{MenuAction, Tray, TrayError, TrayState};
-pub use tray::sections::{default_sections, BuildContext, MenuSection};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use tray::mismatch_tooltip;
+pub use tray::sections::{default_sections, BuildContext, MenuSection, MicDevice};
 pub use tray::PlatformTray;
 
 #[cfg(target_os = "windows")]

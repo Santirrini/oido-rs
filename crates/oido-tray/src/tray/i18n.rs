@@ -89,6 +89,13 @@ pub struct Strings {
     // Se muestra en tooltip del icono + como ítem de menú raíz "fix_model_lang".
     pub model_lang_mismatch_tooltip: &'static str,
     pub model_lang_mismatch_action: &'static str,
+
+    // Submenú "Micrófono" (NUEVO)
+    pub microphone: &'static str,
+    pub mic_auto: &'static str,
+    pub mic_reprobe: &'static str,
+    pub mic_none: &'static str,
+    pub mic_active: &'static str, // sufijo "← activo" / "← active"
 }
 
 /// Selecciona la tabla de strings para el idioma de UI activo.
@@ -148,8 +155,15 @@ pub static STRINGS_ES: Strings = Strings {
     effort_robust: "Robusto (greedy best_of=5) — más lento, mejor con ruido",
     effort_high_quality: "Alta calidad (beam search) — mucho más lento, mejor precisión",
 
-    model_lang_mismatch_tooltip: "oido — ⚠ modelo solo inglés con idioma español; ábreme para corregir",
+    model_lang_mismatch_tooltip:
+        "oido — ⚠ modelo solo inglés con idioma español; ábreme para corregir",
     model_lang_mismatch_action: "⚠ Cambiar a modelo multilingüe…",
+
+    microphone: "Micrófono",
+    mic_auto: "Automático (default del sistema)",
+    mic_reprobe: "Re-probar micrófonos…",
+    mic_none: "No se detectaron dispositivos de entrada",
+    mic_active: "  ← activo",
 };
 
 /// Inglés puro.
@@ -199,8 +213,15 @@ pub static STRINGS_EN: Strings = Strings {
     effort_robust: "Robust (greedy best_of=5) — slower, better with noise",
     effort_high_quality: "High quality (beam search) — much slower, best accuracy",
 
-    model_lang_mismatch_tooltip: "oido — ⚠ English-only model with non-English language; open me to fix",
+    model_lang_mismatch_tooltip:
+        "oido — ⚠ English-only model with non-English language; open me to fix",
     model_lang_mismatch_action: "⚠ Switch to multilingual model…",
+
+    microphone: "Microphone",
+    mic_auto: "Automatic (system default)",
+    mic_reprobe: "Re-probe microphones…",
+    mic_none: "No input devices detected",
+    mic_active: "  ← active",
 };
 
 /// Bilingüe: secciones críticas con ES + EN, resto en ES.
@@ -256,6 +277,12 @@ pub static STRINGS_BILINGUAL: Strings = Strings {
 
     model_lang_mismatch_tooltip: "oido — ⚠ modelo solo inglés / English-only model; ábreme / open me",
     model_lang_mismatch_action: "⚠ Cambiar a modelo multilingüe / Switch to multilingual model…",
+
+    microphone: "Micrófono / Microphone",
+    mic_auto: "Automático / Automatic (default del sistema / system default)",
+    mic_reprobe: "Re-probar micrófonos / Re-probe microphones…",
+    mic_none: "No se detectaron dispositivos / No input devices detected",
+    mic_active: "  ← activo / active",
 };
 
 #[cfg(test)]
@@ -351,6 +378,11 @@ mod tests {
                 ("effort_high_quality", t.effort_high_quality),
                 ("model_lang_mismatch_tooltip", t.model_lang_mismatch_tooltip),
                 ("model_lang_mismatch_action", t.model_lang_mismatch_action),
+                ("microphone", t.microphone),
+                ("mic_auto", t.mic_auto),
+                ("mic_reprobe", t.mic_reprobe),
+                ("mic_none", t.mic_none),
+                ("mic_active", t.mic_active),
             ];
             for (key, val) in s {
                 assert!(

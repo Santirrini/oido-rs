@@ -135,6 +135,16 @@ fn default_effort_preset() -> EffortPreset {
     EffortPreset::Balanced
 }
 
+/// Nombre del dispositivo de entrada preferido por el usuario. `None`
+/// significa "usar el default del sistema operativo" (equivalente al
+/// comportamiento histórico del bin, antes de que existiera selección
+/// de micrófono). El nombre debe matchear exactamente el que devuelve
+/// `cpal::Device::description().name()` (típicamente el nombre del
+/// micrófono que muestra el panel de sonido del OS).
+fn default_input_device() -> Option<String> {
+    None
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -180,6 +190,12 @@ pub struct Config {
     /// `Balanced` (greedy best_of=1, comportamiento histórico).
     #[serde(default = "default_effort_preset")]
     pub effort: EffortPreset,
+    /// Nombre del dispositivo de captura de audio preferido.
+    /// `None` = dispositivo de entrada por defecto del OS.
+    /// Cualquier cambio requiere reconstruir el `CaptureSource` (lo
+    /// hace el handler `SetInputDevice` en el bin).
+    #[serde(default = "default_input_device")]
+    pub input_device: Option<String>,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
@@ -205,6 +221,7 @@ impl Default for Config {
             prompt_preset: default_prompt_preset(),
             system_prompt: default_system_prompt(),
             effort: default_effort_preset(),
+            input_device: default_input_device(),
         }
     }
 }
@@ -366,6 +383,7 @@ mod tests {
                     EffortPreset::Robust,
                     EffortPreset::HighQuality,
                 ]),
+                proptest::option::of(any::<String>()),
             )
                 .prop_map(
                     |(
@@ -380,6 +398,7 @@ mod tests {
                         prompt_preset,
                         system_prompt,
                         effort,
+                        input_device,
                     )| Self {
                         hotkey,
                         model,
@@ -392,6 +411,7 @@ mod tests {
                         prompt_preset,
                         system_prompt,
                         effort,
+                        input_device,
                     },
                 )
                 .boxed()
@@ -461,6 +481,33 @@ mod tests {
         let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
         let cfg: Config = serde_json::from_str(json).expect("JSON sin effort debe parsear");
         assert_eq!(cfg.effort, EffortPreset::Balanced);
+    }
+
+    /// Configs previas a la introducción de la selección de micrófono
+    /// deben parsear con `input_device = None` (= default del OS),
+    /// preservando el comportamiento histórico exacto.
+    #[test]
+    fn backward_compat_missing_input_device_uses_none() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON sin input_device debe parsear");
+        assert_eq!(cfg.input_device, None);
+    }
+
+    /// El campo `input_device` se serializa como `null` cuando es
+    /// `None` (auto) y como el nombre literal cuando está fijado, para
+    /// que el usuario pueda editarlo a mano en `config.json`.
+    #[test]
+    fn input_device_roundtrips_some_and_none() {
+        let mut cfg = Config::default();
+        cfg.input_device = Some("USB Microphone".into());
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let back: Config = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.input_device, Some("USB Microphone".into()));
+
+        cfg.input_device = None;
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let back: Config = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.input_device, None);
     }
 
     /// `EffortPreset` se serializa en kebab-case en `config.json` para

@@ -36,7 +36,9 @@ fn rms_dbfs(samples: &[f32]) -> (f32, f32) {
 }
 
 fn device_name(d: &cpal::Device) -> String {
-    d.description().map(|x| x.name().to_owned()).unwrap_or_default()
+    d.description()
+        .map(|x| x.name().to_owned())
+        .unwrap_or_default()
 }
 
 fn main() {
@@ -47,7 +49,11 @@ fn main() {
     println!("== dispositivos de entrada ==");
     for d in host.input_devices().expect("listar input devices") {
         let name = device_name(&d);
-        let mark = if name == default_name { "  <-- DEFAULT" } else { "" };
+        let mark = if name == default_name {
+            "  <-- DEFAULT"
+        } else {
+            ""
+        };
         println!("  {name}{mark}");
     }
 
@@ -77,8 +83,8 @@ fn main() {
                     let conv: fn($t) -> f32 = $conv;
                     let mut g = buf.lock().unwrap();
                     for frame in data.chunks(channels.max(1)) {
-                        let s: f32 = frame.iter().map(|&x| conv(x)).sum::<f32>()
-                            / frame.len() as f32;
+                        let s: f32 =
+                            frame.iter().map(|&x| conv(x)).sum::<f32>() / frame.len() as f32;
                         g.push(s);
                     }
                 },
