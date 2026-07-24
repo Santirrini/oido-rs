@@ -1,6 +1,6 @@
 //! Filtro de frases alucinadas por whisper.cpp.
 //!
-//! Dos capas complementarias:
+//! Tres capas complementarias:
 //!
 //! 1. **Blacklist** (`FILTER_PHRASES`): match exacto contra frases
 //!    CtQ conocidas. ES + EN mezcladas. La comparación es exacta
@@ -16,8 +16,26 @@
 //!    si la unidad repetida aparece al menos `REPETITION_MIN_COUNT`
 //!    veces y cubre al menos la mitad del texto.
 //!
-//! `filter` aplica las dos capas (blacklist + repetition) y devuelve
-//! `Some(text)` sólo si pasa ambas.
+//! 3. **Artifact Guard** (`is_likely_artifact`): detecta resultados que
+//!    empiezan con un token de cierre huérfano (`)`, `]`, `}`, `»`, `›`)
+//!    seguido de contenido alfanumérico. Es síntoma de que el decoder
+//!    no encontró un inicio coherente y emitió puntuación de cierre
+//!    como primer token (ej. `), so as anything that information is
+//!    about...`). Atrapa lo que el "best decoder" entrega cuando el
+//!    decoder en bucle fue descartado pero ningún candidato era bueno.
+//!
+//! `filter` aplica las tres capas y devuelve `Some(text)` sólo si pasa
+//! todas.
+//!
+//! ## Limitación conocida
+//!
+//! Ninguna de las tres capas detecta una **frase coherente insertada al
+//! final** de una transcripción correcta (ej. `"...texto válido.
+//! Considera el hecho de que eso es una caza de ropa."`). Ese patrón
+//! requiere análisis semántico. El remedio no está aquí sino arriba en
+//! el pipeline: anclar el initial_prompt del decoder (`no_context=false`
+//! en `build_base_params`) para que el modelo tenga contexto léxico y no
+//! divague al final de segmentos largos.
 
 /// Lista cerrada de frases a descartar. Match exacto contra
 /// `trim().to_lowercase()`. ES + EN mezcladas.
@@ -85,8 +103,7 @@ pub fn is_repetition_loop(text: &str) -> bool {
         return false;
     }
 
-    let threshold = (words.len() * REPETITION_COVERAGE_NUMERATOR)
-        / REPETITION_COVERAGE_DENOMINATOR;
+    let threshold = (words.len() * REPETITION_COVERAGE_NUMERATOR) / REPETITION_COVERAGE_DENOMINATOR;
 
     // Probar n-gramas de longitud 1, 2 y 3.
     for n in 1..=MAX_NGRAM {
@@ -103,10 +120,49 @@ pub fn is_repetition_loop(text: &str) -> bool {
     false
 }
 
+/// ¿El texto empieza con un token de cierre huérfano?
+///
+/// Síntoma: cuando todos los decoders fallan o entran en bucle,
+/// whisper.cpp a veces entrega como "best" un resultado que arranca con
+/// puntuación de cierre (`)`, `]`, `}`, `»`, `›`) sin su apertura
+/// correspondiente, seguida de más contenido. Eso no es dictado
+/// legítimo — es un primer token alucinado.
+///
+/// La heurística exige:
+/// 1. El texto (sin whitespace inicial) empieza con uno de los tokens
+///    de cierre listados, opcionalmente seguido de otro signo de
+///    puntuación (`,`, `.`, `;`, `:`, `!`, `?`).
+/// 2. Tras esa secuencia inicial hay contenido alfanumérico. Así
+///    evitamos falsos positivos con dictados válidos de un solo
+///    signo (ej. "cierra paréntesis" → ")").
+///
+/// Falsos positivos evitados a propósito:
+/// - `(`, `[`, `{`: son aperturas, legítimas como inicio de frase.
+/// - `¿`, `¡`: signos de apertura del español, siempre legítimos.
+/// - `,` `.` `;` solos al inicio: pueden ser continuación de edición.
+#[must_use]
+pub fn is_likely_artifact(text: &str) -> bool {
+    let t = text.trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    let first = t.chars().next().expect("no-empty after trim");
+    if !CLOSING_PUNCT.contains(&first) {
+        return false;
+    }
+    // Saltar una secuencia opcional de puntuación de continuación
+    // (`),`, `].`, `» `) para llegar al contenido sustantivo.
+    let rest: String = t
+        .chars()
+        .skip_while(|c| CLOSING_PUNCT.contains(c) || CONTINUATION_PUNCT.contains(c))
+        .collect();
+    rest.chars().any(|c| c.is_alphanumeric())
+}
+
 /// Devuelve `Some(text)` si debe inyectarse, `None` si es alucinación.
 #[must_use]
 pub fn filter(text: &str) -> Option<&str> {
-    if is_filtered(text) || is_repetition_loop(text) {
+    if is_filtered(text) || is_repetition_loop(text) || is_likely_artifact(text) {
         None
     } else {
         Some(text)
@@ -115,15 +171,39 @@ pub fn filter(text: &str) -> Option<&str> {
 
 // ---------------- Repetition Guard internals ----------------
 
-/// Longitud máxima del n-grama a probar (1=palabra, 2=bigrama, 3=trigrama).
-const MAX_NGRAM: usize = 3;
+/// Caracteres de puntuación de cierre cuyo uso como primer token del
+/// resultado es síntoma de alucinación del decoder. NO incluye
+/// aperturas (`(`, `[`, `{`, `¿`, `¡`) que son legítimas al inicio.
+const CLOSING_PUNCT: &[char] = &[')', ']', '}', '»', '›'];
+/// Signos que pueden seguir a un cierre huérfano en el token alucinado
+/// (ej. `),`, `].`). Se saltan al buscar el contenido sustantivo.
+const CONTINUATION_PUNCT: &[char] = &[',', '.', ';', ':', '!', '?'];
+
+/// Longitud máxima del n-grama a probar (1=palabra ... 6=frase corta).
+///
+/// Antes era 3 (hasta trigrama), pero eso dejaba escapar bucles de
+/// frases largas: el caso real "se han quedado en la cadera" (5
+/// palabras) repetido 7 veces tras texto válido no se cazaba porque el
+/// trigrama "se han quedado" solo cubre 21 palabras sobre 88 (< umbral).
+/// El 5-grama "se han quedado en la" sí cubre 35 y dispara el filtro.
+/// 6 es suficiente para frases alucinadas típicas de whisper sin
+/// dispararse en prosa legítima (requiere `REPETITION_MIN_COUNT`
+/// repeticiones exactas de la MISMA secuencia de 6 palabras).
+const MAX_NGRAM: usize = 6;
 /// Mínimo de repeticiones (de la misma unidad) para considerarlo loop.
 const REPETITION_MIN_COUNT: usize = 5;
 /// Cobertura mínima: la unidad repetida debe cubrir al menos esta
 /// fracción del texto (numerador).
 const REPETITION_COVERAGE_NUMERATOR: usize = 1;
-/// Cobertura mínima: denominador (=> 1/2 = 50%).
-const REPETITION_COVERAGE_DENOMINATOR: usize = 2;
+/// Cobertura mínima: denominador (=> 1/3 ~= 33%).
+///
+/// Antes era 1/2 (50%): dejaba escapar repeticiones al final de una
+/// transcripción correcta (caso real: "se han quedado en la cadera"
+/// repetido 7 veces tras ~20 palabras válidas no llegaba al 50% de
+/// cobertura total). 1/3 lo caza sin tocar el `REPETITION_MIN_COUNT=5`,
+/// que sigue exigiendo ≥5 repeticiones de la misma unidad para acotar
+/// los falsos positivos.
+const REPETITION_COVERAGE_DENOMINATOR: usize = 3;
 
 /// Devuelve el n-grama de tamaño `n` más frecuente en `words`
 /// (no requiere contigüidad) junto con su conteo. Si no hay ninguno
@@ -210,6 +290,30 @@ mod tests {
         assert_eq!(filter(loop_text), None);
     }
 
+    /// Caso real del log: tras una transcripción correcta inicial, el
+    /// decoder (sin anclaje de prompt) entró en bucle repitiendo "se
+    /// han quedado en la cadera" 7 veces. Con el umbral anterior de
+    /// cobertura 1/2 esto NO se cazaba porque la repetición no llegaba
+    /// al 50% del texto total (había ~20 palabras válidas antes). Con
+    /// 1/3 sí.
+    #[test]
+    fn trailing_repetition_after_valid_text_caught() {
+        let text = "Y, ya que no hay lugar para hidrón en la naturaleza \
+                    de las violaciones, los dos son los que les permiten \
+                    que los preditores se pongan en la casa. A un mismo \
+                    tiempo, los que se han hecho poner en la cadera, \
+                    se han quitado y se han quedado en la cadera. \
+                    Se han quedado en la cadera. Se han quedado en la \
+                    cadera. Se han quedado en la cadera. Se han quedado \
+                    en la cadera. Se han quedado en la cadera. Se han \
+                    quedado en la cadera.";
+        assert!(
+            is_repetition_loop(text),
+            "la repetición final debe cazarse con cobertura 1/3"
+        );
+        assert_eq!(filter(text), None);
+    }
+
     #[test]
     fn bigram_loop_caught() {
         let s = "subscribe subscribe subscribe subscribe subscribe subscribe subscribe";
@@ -246,13 +350,64 @@ mod tests {
     }
 
     #[test]
-    fn filter_applies_both_layers() {
+    fn filter_applies_all_layers() {
         // Blacklist
         assert_eq!(filter("thank you for watching"), None);
         // Repetición
         let long_loop = "x ".repeat(50);
         assert_eq!(filter(long_loop.trim()), None);
+        // Artifact (token de cierre huérfano)
+        assert_eq!(filter("), so as anything that information is about"), None);
         // OK
         assert_eq!(filter("hola mundo"), Some("hola mundo"));
+    }
+
+    // ---------------- Artifact Guard tests ----------------
+
+    /// Caso real del log: tras descartar un repetition-loop, el "best
+    /// decoder" entregó `), so as anything that information is about,
+    /// this might be the answer.` como primer token. Eso es un token
+    /// de cierre huérfano y debe cazarse.
+    #[test]
+    fn orphaned_closing_token_caught() {
+        assert!(is_likely_artifact(
+            "), so as anything that information is about"
+        ));
+        assert!(is_likely_artifact("]. algo"));
+        assert!(is_likely_artifact("} más texto"));
+        assert!(is_likely_artifact("», dijo ella"));
+        assert_eq!(filter("), so as anything that information is about"), None);
+    }
+
+    #[test]
+    fn opening_punct_passes() {
+        // Aperturas son legítimas al inicio de frase.
+        assert!(!is_likely_artifact("(hola mundo)"));
+        assert!(!is_likely_artifact("[nota al margen]"));
+        assert!(!is_likely_artifact("{clave: valor}"));
+    }
+
+    #[test]
+    fn spanish_inverted_marks_pass() {
+        // ¿ ¡ son aperturas del español, nunca artifacts.
+        assert!(!is_likely_artifact("\u{bf}cómo estás?")); // «¿cómo estás?»
+        assert!(!is_likely_artifact("\u{a1}qué bueno!")); // «¡qué bueno!»
+    }
+
+    #[test]
+    fn bare_closing_punct_passes() {
+        // Un solo signo de cierre sin contenido alfanumérico posterior
+        // puede ser dictado legítimo ("cierra paréntesis" → ")").
+        assert!(!is_likely_artifact(")"));
+        assert!(!is_likely_artifact("] "));
+        assert!(!is_likely_artifact("},."));
+    }
+
+    #[test]
+    fn normal_text_passes_artifact_check() {
+        assert!(!is_likely_artifact("Hola, ¿cómo estás?"));
+        assert!(!is_likely_artifact("The quick brown fox"));
+        assert!(!is_likely_artifact(""));
+        assert!(!is_likely_artifact("   "));
     }
 }
