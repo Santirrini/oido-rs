@@ -232,12 +232,16 @@ pub(crate) fn preset_settings(preset: oido_config::EffortPreset) -> EffortSettin
     use oido_config::EffortPreset;
     match preset {
         // === Balanced ===
-        // Default histórico. Greedy best_of=1, sin fallback de
-        // temperatura, entropy_thold estándar. Velocidad 1×.
+        // Default histórico. Greedy best_of=1, entropy_thold estándar.
+        // `temperature_inc=0.2` es el mecanismo anti-repetition-loop de
+        // whisper.cpp: si la primera pasada greedy entra en bucle, se
+        // reintenta con temperatura subida. En audio claro esto no añade
+        // coste (1 pasada), pero rescata dictados ambiguos que antes se
+        // entregaban truncados o en bucle.
         EffortPreset::Balanced => EffortSettings {
             strategy: SamplingStrategy::Greedy { best_of: 1 },
             temperature: 0.0,
-            temperature_inc: 0.0,
+            temperature_inc: 0.2,
             entropy_thold: 2.4,
             length_penalty: None,
         },
@@ -313,25 +317,38 @@ pub(crate) fn build_base_params<'a>(
     if let Some(lp) = settings.length_penalty {
         params.set_length_penalty(lp);
     }
-                                     // NOTA: `set_max_len` mide CARACTERES por segmento (no tokens).
-                                     // Activarlo fragmenta palabras a la mitad y degrada la salida.
-                                     // La anti-alucinación real ya está cubierta por
-                                     // `entropy_thold`/`logprob_thold`/`suppress_blank`/`suppress_nst`.
-                                     // Por eso NO llamamos set_max_len: el default (0 = sin límite) es
-                                     // el correcto para hold-to-talk.
+    // NOTA: `set_max_len` mide CARACTERES por segmento (no tokens).
+    // Activarlo fragmenta palabras a la mitad y degrada la salida.
+    // La anti-alucinación real ya está cubierta por
+    // `entropy_thold`/`logprob_thold`/`suppress_blank`/`suppress_nst`.
+    // Por eso NO llamamos set_max_len: el default (0 = sin límite) es
+    // el correcto para hold-to-talk.
 
-    // === Optimización para dictado corto (<30s) ===
-    // `single_segment` solo afecta al DECODER (segmentación de
-    // marcas de tiempo dentro de la ventana); NO ahorra trabajo del
-    // encoder. Para audio <30s, el bucle de whisper.cpp itera una
-    // sola vez sin importar este flag. Lo dejamos en true porque
-    // produce una salida limpia sin timestamps intermedios, que es
-    // lo que queremos para inyectar texto.
-    params.set_single_segment(true);
-    // No usar el resultado de la transcripción anterior como prompt;
-    // en dictado puntual causa que frases se "peguen" entre
-    // activaciones.
-    params.set_no_context(true);
+    // === Segmentación para dictado corto (<30s) ===
+    // `single_segment` controla la segmentación INTERNA del decoder
+    // (cuántos segmentos de timestamp emite dentro de la ventana). NO
+    // afecta al encoder ni al texto de salida: los timestamps no
+    // aparecen en el texto inyectado de ninguna manera.
+    //
+    // Debe ir en `false` (igual que `build_streaming_params`) para que el
+    // audio corto se segmente naturalmente. Si va en `true`, whisper.cpp
+    // emite un único timestamp de cierre y entra en la rama "single
+    // timestamp ending - skip entire chunk" que descarta el segmento y
+    // degrada el resultado. Pre-Fix esto se veía en Batch/Chunked.
+    params.set_single_segment(false);
+    // `no_context=false`: preserva el initial_prompt (texto de anclaje)
+    // en `prompt_past1` para que el decoder lo use como contexto léxico
+    // en cada ventana. Con `no_context=true` el prompt se vaciaba al
+    // inicio de cada `full()` (ver whisper.cpp:6900-6903) y el decoder
+    // quedaba SIN anclaje → alucinaciones y bucles en audio ambiguo.
+    //
+    // Es seguro aquí porque el `WhisperState` es una variable LOCAL en
+    // `transcribe()` (creada con `ctx.create_state()` y dropeada al
+    // retornar). No persiste entre activaciones de dictado, así que no
+    // hay riesgo de que frases se "peguen" entre una y otra. El riesgo
+    // de pegado solo aplica a `build_streaming_params` (estado
+    // persistente), donde `no_context` debe quedar en `true`.
+    params.set_no_context(false);
     // Sin timestamps a nivel de token (overhead innecesario).
     params.set_token_timestamps(false);
 
@@ -387,6 +404,19 @@ pub(crate) fn build_streaming_params<'a>(
     // Streaming-specific: allow natural segmentation to avoid
     // "single timestamp ending - skip entire chunk" seek loop.
     params.set_single_segment(false);
+    // `no_context=true` es NECESARIO aquí (a diferencia de
+    // `build_base_params`): el `WhisperState` del streamer es
+    // PERSISTENTE entre activaciones de dictado (`streaming.rs:44`); si
+    // lo dejáramos en `false`, el output decodificado de un dictado se
+    // acumularía en `prompt_past1` y se usaría como contexto del
+    // siguiente dictado, pegando frases entre activaciones. `reset()`
+    // (`streaming.rs:305-308`) solo limpia `prev_tokens`/
+    // `confirmed_count`, NO el estado de whisper.
+    //
+    // Trade-off: el initial_prompt de anclaje no se preserva entre
+    // ventanas (se vacía en cada `full()`). Lo compensa el
+    // LocalAgreement-2, que mitiga alucinaciones requiriendo acuerdo
+    // de prefijo entre dos pasadas independientes.
     params.set_no_context(true);
     params.set_token_timestamps(true);
 
@@ -720,6 +750,15 @@ impl Transcriber for WhisperCpp {
     }
 
     fn load_model(&mut self, model_path: &Path) -> Result<(), SttError> {
+        // Instalar los hooks de logging ANTES de crear el WhisperContext.
+        // Sin esto, whisper.cpp/ggml usan su callback default que escribe
+        // directo a stderr con `fputs`, escapando del EnvFilter de tracing
+        // y emitiendo logs INFO verbosos (device discovery, ggml_backend
+        // init, whisper_full_with_state por cada token durante warm_up).
+        // Es idempotente (usa `Once` internamente) → seguro llamarlo
+        // incluso si hay múltiples load_model en runtime (no es el caso,
+        // pero el hook lo permite).
+        whisper_rs::install_logging_hooks();
         if !model_path.exists() {
             return Err(SttError::ModelNotFound(model_path.to_path_buf()));
         }
@@ -841,6 +880,15 @@ mod tests {
         // Balanced = comportamiento histórico.
         let s = preset_settings(oido_config::EffortPreset::Balanced);
         assert!((s.entropy_thold - 2.4).abs() < f32::EPSILON);
+        // Regression: Balanced debe tener temperature_inc=0.2 para que
+        // whisper.cpp pueda escapar de un repetition-loop subiendo la
+        // temperatura. Antes era 0.0 (sin escape → dictado entregado
+        // truncado o en bucle cuando la primera pasada fallaba).
+        assert!(
+            (s.temperature_inc - 0.2).abs() < f32::EPSILON,
+            "Balanced esperaba temperature_inc=0.2, obtuve {}",
+            s.temperature_inc
+        );
 
         // Robust y HighQuality son más estrictos con la entropía.
         let s_robust = preset_settings(oido_config::EffortPreset::Robust);
