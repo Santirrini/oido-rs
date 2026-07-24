@@ -9,9 +9,9 @@ use std::thread;
 use crossbeam_channel::Sender;
 #[allow(unused_imports)]
 use oido_config::ConfigStore;
+use oido_stt::is_vad_model_filename;
 #[allow(unused_imports)]
 use oido_stt::SharedTranscriber;
-use oido_stt::is_vad_model_filename;
 use oido_stt::Transcriber;
 use oido_tray::TrayState;
 

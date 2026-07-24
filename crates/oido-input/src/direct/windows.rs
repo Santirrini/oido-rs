@@ -114,7 +114,10 @@ impl UiaDirectInjector {
 impl DirectInjector for UiaDirectInjector {
     fn inject_focused(&self, text: &str) -> Result<(), InjectError> {
         let (reply_tx, reply_rx) = bounded::<Result<(), InjectError>>(1);
-        let job = Job { text: text.to_owned(), reply: reply_tx };
+        let job = Job {
+            text: text.to_owned(),
+            reply: reply_tx,
+        };
 
         // Si el canal está saturado (8 jobs encolados), bloqueamos: preferimos
         // esperar antes que descartar transcripciones del usuario.
@@ -150,7 +153,10 @@ fn run_worker(rx: Receiver<Job>) {
     let automation = match UIAutomation::new() {
         Ok(a) => a,
         Err(e) => {
-            tracing::warn!(?e, "UIAutomation::new falló; drenando canal con Unsupported");
+            tracing::warn!(
+                ?e,
+                "UIAutomation::new falló; drenando canal con Unsupported"
+            );
             drain_with_unavailable(&rx);
             return;
         }
@@ -175,7 +181,9 @@ fn run_worker(rx: Receiver<Job>) {
 
 fn drain_with_unavailable(rx: &Receiver<Job>) {
     while let Ok(job) = rx.recv() {
-        let _ = job.reply.send(Err(InjectError::Unsupported("UIA no inicializado".into())));
+        let _ = job
+            .reply
+            .send(Err(InjectError::Unsupported("UIA no inicializado".into())));
     }
 }
 
@@ -201,10 +209,7 @@ fn inject_via_uia(automation: &UIAutomation, text: &str) -> Result<(), InjectErr
             // Falso positivo o timeout. No podemos afirmar que el focused
             // no es editable: caemos al clipboard (mejor que perder el
             // texto) pero advertimos para diagnóstico.
-            tracing::warn!(
-                ?e,
-                "is_keyboard_focusable falló; fallback a clipboard",
-            );
+            tracing::warn!(?e, "is_keyboard_focusable falló; fallback a clipboard",);
             return Err(InjectError::Unsupported(format!(
                 "is_keyboard_focusable: {e}"
             )));
@@ -229,8 +234,8 @@ fn env_enabled() -> Option<bool> {
     match std::env::var(ENV_ENABLED) {
         Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => Some(false),
         Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => Some(true),
-        Ok(_) => None,                  // valor no reconocido: dejar default
-        Err(_) => Some(false),          // no seteada: DESACTIVADO (default opt-in)
+        Ok(_) => None,         // valor no reconocido: dejar default
+        Err(_) => Some(false), // no seteada: DESACTIVADO (default opt-in)
     }
 }
 

@@ -183,11 +183,7 @@ impl WavDumper {
 }
 
 /// Escribe un WAV RIFF con formato IEEE float (3), mono, `sample_rate`.
-fn write_wav_f32(
-    path: &std::path::Path,
-    samples: &[f32],
-    sample_rate: u32,
-) -> std::io::Result<()> {
+fn write_wav_f32(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> std::io::Result<()> {
     let data_len = (samples.len() * 4) as u32;
     let mut w = BufWriter::new(std::fs::File::create(path)?);
 
@@ -236,9 +232,7 @@ mod tests {
     #[test]
     fn analyze_full_scale_sine_near_zero_dbfs() {
         // Seno a amplitud 1.0: RMS = 1/sqrt(2) ≈ -3.01 dBFS, pico = 0 dBFS.
-        let samples: Vec<f32> = (0..16_000)
-            .map(|i| (i as f32 * 0.05).sin())
-            .collect();
+        let samples: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.05).sin()).collect();
         let s = analyze(&samples);
         assert!(
             (s.rms_dbfs - (-3.01)).abs() < 0.1,

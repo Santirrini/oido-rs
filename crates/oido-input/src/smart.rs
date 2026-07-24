@@ -26,7 +26,10 @@ pub struct SmartInjector {
 impl fmt::Debug for SmartInjector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SmartInjector")
-            .field("direct", &self.direct.as_ref().map(|d| d as &dyn fmt::Debug))
+            .field(
+                "direct",
+                &self.direct.as_ref().map(|d| d as &dyn fmt::Debug),
+            )
             .field("fallback", &self.fallback)
             .finish_non_exhaustive()
     }
@@ -43,10 +46,7 @@ impl SmartInjector {
     /// (p.ej. `OIDO_UIA_ENABLED=0`, error de `CoInitializeEx`, o SO no
     /// soportado por el stub), se registra un warn y se continúa solo con
     /// el fallback.
-    pub fn with_direct_factory<F>(
-        fallback: Arc<dyn Injector>,
-        make_direct: F,
-    ) -> Self
+    pub fn with_direct_factory<F>(fallback: Arc<dyn Injector>, make_direct: F) -> Self
     where
         F: FnOnce() -> Result<Arc<dyn DirectInjector>, InjectError>,
     {
