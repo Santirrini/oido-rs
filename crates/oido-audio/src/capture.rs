@@ -23,6 +23,7 @@ use crate::{AudioError, AudioFrame, CaptureSource};
 
 pub struct CpalCapture {
     device: cpal::Device,
+    device_name: String,
     stream_config: cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     sample_rate: u32,
@@ -33,6 +34,7 @@ pub struct CpalCapture {
 impl std::fmt::Debug for CpalCapture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CpalCapture")
+            .field("device", &self.device_name)
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.stream_config.channels)
             .field("sample_format", &self.sample_format)
@@ -41,49 +43,100 @@ impl std::fmt::Debug for CpalCapture {
     }
 }
 
-impl CpalCapture {
-    pub fn new() -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| AudioError::Capture("sin dispositivo de entrada por defecto".into()))?;
+/// Descripción ligera de un dispositivo de entrada — lo que devolvemos
+/// al submenú del tray y al CLI. Sin cpal-types en la API pública.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
 
-        // Preferimos 16 kHz mono F32 (lo que necesita whisper.cpp). Si
-        // no está disponible, caemos al default del dispositivo; el
-        // consumer thread de oido-core hará el resampling a 16 kHz
-        // antes de transcribir.
-        let mut wanted = None;
-        if let Ok(supported) = device.supported_input_configs() {
-            for cfg in supported {
-                if cfg.channels() == 1
-                    && cfg.sample_format() == cpal::SampleFormat::F32
-                    && cfg.contains_rate(16_000)
-                {
-                    wanted = cfg.try_with_sample_rate(16_000);
-                    break;
+impl CpalCapture {
+    /// Constructor con selección explícita de dispositivo.
+    ///
+    /// - `Some(name)`: enumera los dispositivos de entrada y elige el
+    ///   cuyo `description().name()` coincide con `name`. Si no se
+    ///   encuentra, emite un `warn!` y cae al default del OS.
+    /// - `None`: usa el dispositivo de entrada por defecto (mismo
+    ///   comportamiento que el bin tenía antes de esta feature).
+    pub fn with_device(name: Option<&str>) -> Result<Self, AudioError> {
+        let host = cpal::default_host();
+        let default_device = host.default_input_device();
+        let default_name = default_device
+            .as_ref()
+            .and_then(|d| d.description().ok().map(|x| x.name().to_owned()));
+
+        let (device, device_name) = match name {
+            None => match default_device {
+                Some(d) => {
+                    let n = d
+                        .description()
+                        .ok()
+                        .map(|x| x.name().to_owned())
+                        .unwrap_or_else(|| "<unknown>".into());
+                    (d, n)
                 }
-            }
-        }
-        let (stream_config, sample_format, sample_rate) = match wanted {
-            Some(s) => (s.config(), cpal::SampleFormat::F32, 16_000_u32),
-            None => {
-                let fallback = device
-                    .default_input_config()
-                    .map_err(|e| AudioError::Capture(format!("default_input_config: {e}")))?;
-                tracing::warn!(
-                    requested = 16_000,
-                    actual = fallback.sample_rate(),
-                    "dispositivo no soporta 16kHz mono F32; usando default + resampling"
-                );
-                let cfg = fallback.config();
-                let rate = fallback.sample_rate();
-                let fmt = fallback.sample_format();
-                (cfg, fmt, rate)
+                None => {
+                    return Err(AudioError::Capture(
+                        "sin dispositivo de entrada por defecto".into(),
+                    ));
+                }
+            },
+            Some(want) => {
+                let mut found = None;
+                if let Ok(devs) = host.input_devices() {
+                    for d in devs {
+                        let n = d
+                            .description()
+                            .ok()
+                            .map(|x| x.name().to_owned())
+                            .unwrap_or_default();
+                        if n == want {
+                            found = Some((d, n));
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!(
+                            requested = %want,
+                            "dispositivo de entrada solicitado no existe; cayendo al default del OS"
+                        );
+                        match default_device {
+                            Some(d) => {
+                                let n = d
+                                    .description()
+                                    .ok()
+                                    .map(|x| x.name().to_owned())
+                                    .unwrap_or_else(|| "<unknown>".into());
+                                (d, n)
+                            }
+                            None => {
+                                return Err(AudioError::Capture(format!(
+                                    "dispositivo '{want}' no existe y no hay default de OS"
+                                )));
+                            }
+                        }
+                    }
+                }
             }
         };
 
+        if let Some(ref def) = default_name {
+            if def == &device_name {
+                tracing::info!(device = %device_name, "captura desde dispositivo por defecto del OS");
+            } else {
+                tracing::info!(device = %device_name, "captura desde dispositivo seleccionado por el usuario");
+            }
+        }
+
+        let (stream_config, sample_format, sample_rate) = negotiate_config(&device)?;
+
         Ok(Self {
             device,
+            device_name,
             stream_config,
             sample_format,
             sample_rate,
@@ -91,6 +144,242 @@ impl CpalCapture {
             stream: None,
         })
     }
+
+    /// Constructor sin selección explícita: usa el default del OS.
+    /// Equivalente a `with_device(None)`. Mantenido para no romper
+    /// el ejemplo `mic_check.rs` y los tests existentes.
+    pub fn new() -> Result<Self, AudioError> {
+        Self::with_device(None)
+    }
+}
+
+/// Negocia la mejor configuración de captura para un dispositivo
+/// dado. Preferencia: 16 kHz mono F32 (lo que necesita whisper.cpp).
+/// Si no está soportado, cae a `default_input_config()` y deja que
+/// el resampler de `oido-core` haga la conversión.
+fn negotiate_config(
+    device: &cpal::Device,
+) -> Result<(cpal::StreamConfig, cpal::SampleFormat, u32), AudioError> {
+    let mut wanted = None;
+    if let Ok(supported) = device.supported_input_configs() {
+        for cfg in supported {
+            if cfg.channels() == 1
+                && cfg.sample_format() == cpal::SampleFormat::F32
+                && cfg.contains_rate(16_000)
+            {
+                wanted = cfg.try_with_sample_rate(16_000);
+                break;
+            }
+        }
+    }
+    match wanted {
+        Some(s) => Ok((s.config(), cpal::SampleFormat::F32, 16_000_u32)),
+        None => {
+            let fallback = device
+                .default_input_config()
+                .map_err(|e| AudioError::Capture(format!("default_input_config: {e}")))?;
+            tracing::warn!(
+                requested = 16_000,
+                actual = fallback.sample_rate(),
+                "dispositivo no soporta 16kHz mono F32; usando default + resampling"
+            );
+            Ok((
+                fallback.config(),
+                fallback.sample_format(),
+                fallback.sample_rate(),
+            ))
+        }
+    }
+}
+
+/// Lista los dispositivos de entrada disponibles en el host por
+/// defecto. El primero con `is_default = true` es el que el OS elige
+/// cuando no se hace una selección explícita. Usado por el submenú
+/// "Micrófono" del tray y por el flag `--set-mic` del CLI para
+/// validar el argumento.
+pub fn list_input_devices() -> Vec<InputDeviceInfo> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.description().ok().map(|x| x.name().to_owned()));
+    let mut out = Vec::new();
+    if let Ok(devs) = host.input_devices() {
+        for d in devs {
+            let name = d
+                .description()
+                .ok()
+                .map(|x| x.name().to_owned())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let is_default = default_name.as_deref() == Some(name.as_str());
+            out.push(InputDeviceInfo { name, is_default });
+        }
+    }
+    out
+}
+
+/// Resultado del sondeo de calidad de un dispositivo individual.
+#[derive(Debug, Clone)]
+pub struct DeviceProbe {
+    pub name: String,
+    /// RMS en dBFS durante el periodo de sondeo. -inf = silencio total.
+    pub rms_dbfs: f32,
+    /// Fracción de muestras con |x| < 1e-4 (0..1). 1.0 = silencio
+    /// digital exacto (muteado / sin permiso / dispositivo sin señal).
+    pub near_zero_frac: f32,
+}
+
+/// Sondea todos los dispositivos de entrada disponibles. Para cada
+/// uno abre un stream corto, captura `duration_ms` y mide RMS. El
+/// sondeo se hace secuencialmente para evitar peleas de permisos
+/// con el dispositivo por defecto del OS.
+///
+/// Devuelve el nombre del dispositivo con mejor RMS, **excluyendo**
+/// los que dan silencio digital (`near_zero_frac > 0.99`). Si todos
+/// los dispositivos dan silencio, devuelve `None` — el caller decide
+/// qué hacer (típicamente: `warn!` y no persistir nada).
+///
+/// Se ejecuta en un thread dedicado en el caller (la operación
+/// bloquea `duration_ms * N_devices`).
+pub fn probe_devices(duration_ms: u32) -> Vec<DeviceProbe> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.description().ok().map(|x| x.name().to_owned()));
+
+    let mut results: Vec<DeviceProbe> = Vec::new();
+    let Ok(devs) = host.input_devices() else {
+        return results;
+    };
+    for d in devs {
+        let name = d
+            .description()
+            .ok()
+            .map(|x| x.name().to_owned())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let is_default = default_name.as_deref() == Some(name.as_str());
+        let probe = match probe_one(&d, &name, duration_ms, is_default) {
+            Some(p) => p,
+            None => continue,
+        };
+        results.push(probe);
+    }
+    results
+}
+
+fn probe_one(
+    device: &cpal::Device,
+    name: &str,
+    duration_ms: u32,
+    is_default: bool,
+) -> Option<DeviceProbe> {
+    use std::sync::{Arc, Mutex};
+    let cfg = device.default_input_config().ok()?;
+    let sample_rate = cfg.sample_rate();
+    let channels = cfg.channels() as usize;
+    let stream_config = cfg.config();
+    let sample_format = cfg.sample_format();
+    let buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+
+    macro_rules! build_stream {
+        ($t:ty, $conv:expr) => {{
+            let buf = Arc::clone(&buf);
+            let channels = channels;
+            let name_for_err = name.to_string();
+            device.build_input_stream(
+                stream_config.clone(),
+                move |data: &[$t], _| {
+                    let conv: fn($t) -> f32 = $conv;
+                    let mut g = buf.lock().expect("poisoned");
+                    for frame in data.chunks(channels.max(1)) {
+                        let s: f32 = frame.iter().map(|&x| conv(x)).sum::<f32>()
+                            / frame.len() as f32;
+                        g.push(s);
+                    }
+                },
+                move |e| tracing::error!(device = %name_for_err, ?e, "probe stream error"),
+                None,
+            )
+        }};
+    }
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => build_stream!(f32, |x| x),
+        cpal::SampleFormat::I16 => build_stream!(i16, |x| f32::from(x) / 32_768.0),
+        cpal::SampleFormat::U16 => build_stream!(u16, |x| (f32::from(x) - 32_768.0) / 32_768.0),
+        f => {
+            tracing::debug!(device = name, ?f, "probe: sample format no soportado");
+            return None;
+        }
+    }
+    .ok()?;
+    if stream.play().is_err() {
+        return None;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(u64::from(duration_ms)));
+    let _ = stream.pause();
+    drop(stream);
+
+    let samples = buf.lock().expect("poisoned").clone();
+    let (rms, zeros_frac) = rms_dbfs(&samples);
+    tracing::info!(
+        device = name,
+        is_default,
+        sample_rate,
+        captured = samples.len(),
+        rms_dbfs = rms,
+        near_zero_frac = zeros_frac,
+        "probe: dispositivo sondeado"
+    );
+    Some(DeviceProbe {
+        name: name.to_string(),
+        rms_dbfs: rms,
+        near_zero_frac: zeros_frac,
+    })
+}
+
+/// Escoge el mejor dispositivo a partir de un vector de probes.
+/// "Mejor" = mayor RMS, descartando los que son silencio digital
+/// (`near_zero_frac > 0.99`). Si todos son silencio, devuelve `None`.
+pub fn pick_best_device(probes: &[DeviceProbe]) -> Option<String> {
+    let eligible: Vec<&DeviceProbe> = probes
+        .iter()
+        .filter(|p| p.near_zero_frac < 0.99 && p.rms_dbfs.is_finite())
+        .collect();
+    eligible
+        .into_iter()
+        .max_by(|a, b| {
+            a.rms_dbfs
+                .partial_cmp(&b.rms_dbfs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|p| p.name.clone())
+}
+
+fn rms_dbfs(samples: &[f32]) -> (f32, f32) {
+    if samples.is_empty() {
+        return (f32::NEG_INFINITY, 1.0);
+    }
+    let mut sum = 0.0f64;
+    let mut zeros = 0usize;
+    for &s in samples {
+        sum += f64::from(s) * f64::from(s);
+        if s.abs() < 1e-4 {
+            zeros += 1;
+        }
+    }
+    let rms = (sum / samples.len() as f64).sqrt() as f32;
+    let db = if rms <= 0.0 {
+        f32::NEG_INFINITY
+    } else {
+        20.0 * rms.log10()
+    };
+    (db, zeros as f32 / samples.len() as f32)
 }
 
 impl CaptureSource for CpalCapture {
@@ -205,7 +494,6 @@ impl CaptureSource for CpalCapture {
         self.sample_rate
     }
 }
-
 
 // =========================================================================
 // Resampler: vive en `oido-core` (donde tiene estado entre frames). Lo

@@ -35,4 +35,16 @@ pub(crate) struct Cli {
     /// Busca y aplica actualizaciones de la aplicación (MSI) y sale
     #[arg(long)]
     pub check_update: bool,
+
+    /// Fija el micrófono de captura. Cadena vacía ("") resetea a
+    /// modo automático (default del sistema operativo). El nombre
+    /// debe matchear EXACTAMENTE el que devuelve cpal (típicamente
+    /// el nombre que muestra el panel de sonido del OS). Persiste
+    /// en config.json y reconstruye el pipeline al arrancar.
+    ///
+    /// Ejemplos:
+    ///   --set-mic "USB Microphone"
+    ///   --set-mic ""        # → automático
+    #[arg(long)]
+    pub set_mic: Option<String>,
 }

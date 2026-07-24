@@ -65,4 +65,7 @@ pub trait CaptureSource: Send + std::fmt::Debug + 'static {
 
 mod capture;
 
-pub use capture::{CpalCapture, Resampler};
+pub use capture::{
+    list_input_devices, pick_best_device, probe_devices, CpalCapture, DeviceProbe, InputDeviceInfo,
+    Resampler,
+};

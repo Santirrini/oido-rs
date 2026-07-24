@@ -28,6 +28,11 @@ use oido_models::{ModelEntry, ModelFamily};
 use crate::traits::MenuAction;
 use crate::tray::i18n::{strings, Strings};
 
+/// Prefijo canónico para los items del submenú Micrófono. El bin
+/// extrae el nombre del dispositivo con `id.strip_prefix("mic:")` en
+/// `id_to_action` y lo pasa a `MenuAction::SetInputDevice(name)`.
+const MIC_ITEM_PREFIX: &str = "mic:";
+
 /// ID canónico de un item, estable entre OS. Sirve como clave del
 /// `HashMap<MenuId, MenuAction>` que el forwarder necesita para mapear
 /// clics a acciones.
@@ -452,6 +457,117 @@ impl MenuSection for PromptSection {
 }
 
 // ---------------------------------------------------------------------------
+// Sección "Micrófono" — submenú dinámico con los dispositivos de
+// entrada detectados por cpal, más un item "Automático" (default del
+// OS) y un disparador de re-sondeo de calidad.
+// ---------------------------------------------------------------------------
+
+/// Dispositivo de entrada, en el formato mínimo que necesita la
+/// sección. Lo construye el bin desde `oido_audio::list_input_devices()`
+/// y lo inyecta en `BuildContext` para mantener este crate sin
+/// dependencias de cpal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicDevice {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug)]
+pub struct MicrophoneSection {
+    pub devices: Vec<MicDevice>,
+    /// `None` = modo automático (default del OS). `Some(name)` = fijado
+    /// al dispositivo con ese nombre exacto.
+    pub active: Option<String>,
+    pub ui_language: UiLanguage,
+}
+
+impl MicrophoneSection {
+    pub fn new(devices: Vec<MicDevice>, active: Option<String>, ui_language: UiLanguage) -> Self {
+        Self {
+            devices,
+            active,
+            ui_language,
+        }
+    }
+}
+
+/// Sufijo corto "← activo" / "← active" para el item "Automático" del
+/// submenú Micrófono. Se localiza por heurística sobre el label del
+/// submenú (los 3 idiomas los distinguimos así sin añadir un campo
+/// nuevo a `Strings`).
+fn mic_active_short(ui_language: UiLanguage) -> &'static str {
+    match ui_language {
+        UiLanguage::En => "  ← active",
+        _ => "  ← activo",
+    }
+}
+
+impl MenuSection for MicrophoneSection {
+    fn id(&self) -> &'static str {
+        "microphone"
+    }
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+        let mut items: Vec<MenuItemSpec> = Vec::new();
+
+        // Item "Automático" — siempre primero, ✓ cuando active.is_none().
+        let auto_active = self.active.is_none();
+        let mut auto_label = format!("{}{}", check_or_blank(auto_active), s.mic_auto);
+        if auto_active {
+            auto_label.push_str(mic_active_short(self.ui_language));
+        }
+        items.push(MenuItemSpec {
+            id: "mic_auto".into(),
+            label: auto_label,
+            enabled: true,
+        });
+
+        if self.devices.is_empty() {
+            items.push(MenuItemSpec {
+                id: String::new(),
+                label: format!("  {}", s.mic_none),
+                enabled: false,
+            });
+        } else {
+            for d in &self.devices {
+                let is_active = self.active.as_deref() == Some(d.name.as_str());
+                let mut label = format!("{}{}", check_or_blank(is_active), d.name);
+                if d.is_default {
+                    label.push_str("  (default)");
+                }
+                if is_active {
+                    label.push_str(s.mic_active);
+                }
+                items.push(MenuItemSpec {
+                    id: format!("{MIC_ITEM_PREFIX}{}", d.name),
+                    label,
+                    enabled: true,
+                });
+            }
+        }
+
+        // Separador visual + item de re-sondeo (lo aísla del listado
+        // de dispositivos, igual que `open_models_dir` y `check_updates`
+        // en la sección Modelos).
+        items.push(MenuItemSpec {
+            id: String::new(),
+            label: "─────────────────".into(),
+            enabled: false,
+        });
+        items.push(MenuItemSpec {
+            id: "mic_reprobe".into(),
+            label: s.mic_reprobe.into(),
+            enabled: true,
+        });
+
+        vec![Section::Submenu {
+            label: s.microphone.into(),
+            items,
+        }]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sección "Modelos" — refactor para usar strings i18n
 // ---------------------------------------------------------------------------
 
@@ -625,6 +741,15 @@ pub struct BuildContext {
     /// modelo multilingüe equivalente (p.ej. `"ggml-small.bin"`). Si es
     /// `None`, no se renderiza la sección de aviso.
     pub model_lang_mismatch: Option<String>,
+    /// Dispositivos de entrada detectados por cpal, en el formato
+    /// ligero que `MicrophoneSection` espera (sin tipos cpal en la API
+    /// pública de este crate). El bin la construye con
+    /// `oido_audio::list_input_devices()` en cada `build_ctx`.
+    pub input_devices: Vec<MicDevice>,
+    /// `None` = modo automático (default del OS). `Some(name)` =
+    /// dispositivo fijado por el usuario. Lo más reciente de
+    /// `Config::input_device`.
+    pub input_device: Option<String>,
 }
 
 impl BuildContext {
@@ -643,6 +768,8 @@ impl BuildContext {
             prompt_custom_text: String::new(),
             effort: EffortPreset::Balanced,
             model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
         }
     }
 }
@@ -686,6 +813,11 @@ pub fn default_sections(ctx: &BuildContext) -> Vec<Box<dyn MenuSection>> {
         current: ctx.prompt_preset,
         custom_text: ctx.prompt_custom_text.clone(),
     }));
+    out.push(Box::new(MicrophoneSection::new(
+        ctx.input_devices.clone(),
+        ctx.input_device.clone(),
+        ctx.ui_language,
+    )));
     out.push(Box::new(ModelsSection::new(
         ctx.models_dir.clone(),
         ctx.active_model.clone(),
@@ -728,6 +860,11 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
         "check_updates" => MenuAction::CheckUpdates,
         "exit" => MenuAction::Exit,
         "fix_model_lang" => MenuAction::FixModelLanguage(String::new()),
+        "mic_auto" => MenuAction::SetInputDevice(String::new()),
+        "mic_reprobe" => MenuAction::ProbeMicrophones,
+        id if id.starts_with("mic:") => {
+            MenuAction::SetInputDevice(id[MIC_ITEM_PREFIX.len()..].to_string())
+        }
         id if id.starts_with("model:") => MenuAction::ModelItem(id["model:".len()..].to_string()),
         _ => return None,
     })
@@ -829,6 +966,19 @@ mod tests {
             id_to_action("model:ggml-base.bin"),
             Some(MenuAction::ModelItem("ggml-base.bin".to_string()))
         );
+        // microphone
+        assert_eq!(
+            id_to_action("mic_auto"),
+            Some(MenuAction::SetInputDevice(String::new()))
+        );
+        assert_eq!(
+            id_to_action("mic_reprobe"),
+            Some(MenuAction::ProbeMicrophones)
+        );
+        assert_eq!(
+            id_to_action("mic:USB Microphone"),
+            Some(MenuAction::SetInputDevice("USB Microphone".to_string()))
+        );
     }
 
     #[test]
@@ -854,6 +1004,8 @@ mod tests {
             prompt_custom_text: String::new(),
             effort: EffortPreset::Balanced,
             model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
         };
         default_sections(&ctx)
     }
@@ -864,8 +1016,8 @@ mod tests {
         let sections = call_default(dir);
         assert_eq!(
             sections.len(),
-            8,
-            "8 secciones: hotkey, theme, mode, effort, ui_language, prompt, models, exit"
+            9,
+            "9 secciones: hotkey, theme, mode, effort, ui_language, prompt, microphone, models, exit"
         );
         for s in &sections {
             assert!(
@@ -945,6 +1097,8 @@ mod tests {
             prompt_custom_text: String::new(),
             effort: EffortPreset::Balanced,
             model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
         };
         let sections = default_sections(&ctx);
         let sec = sections
@@ -989,6 +1143,8 @@ mod tests {
             prompt_custom_text: "Dictaré kubernetes, gRPC y WASM".into(),
             effort: EffortPreset::Balanced,
             model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
         };
         let sections = default_sections(&ctx);
         let sec = sections.iter().find(|s| s.id() == "prompt").unwrap();
@@ -1028,6 +1184,8 @@ mod tests {
             prompt_custom_text: String::new(),
             effort: EffortPreset::Balanced,
             model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
         };
         let sections = default_sections(&ctx);
         let hotkey = sections.iter().find(|s| s.id() == "hotkey").unwrap();
@@ -1111,11 +1269,17 @@ mod tests {
             prompt_custom_text: String::new(),
             effort: EffortPreset::Balanced,
             model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
         };
         ctx.model_lang_mismatch = Some("ggml-small.bin".into());
 
         let sections = default_sections(&ctx);
-        assert_eq!(sections.len(), 9, "8 base + 1 mismatch = 9");
+        assert_eq!(
+            sections.len(),
+            10,
+            "8 base + 1 mismatch + 1 microphone = 10"
+        );
         assert_eq!(sections[0].id(), "model_lang_mismatch");
 
         let items: Vec<MenuItemSpec> = sections[0]
@@ -1186,6 +1350,8 @@ mod tests {
             "open_models_dir",
             "check_updates",
             "exit",
+            "mic_auto",
+            "mic_reprobe",
         ] {
             assert!(
                 all_ids.iter().any(|id| id == expected),
@@ -1195,6 +1361,111 @@ mod tests {
                 id_to_action(expected).is_some(),
                 "id_to_action debe mapear {expected}"
             );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Tests específicos de MicrophoneSection
+    // -------------------------------------------------------------------
+
+    /// Items esperados del submenú Micrófono:
+    ///   1 (mic_auto) + N dispositivos + 1 separador + 1 (mic_reprobe) = N + 3.
+    fn mic_items(section: &MicrophoneSection) -> Vec<MenuItemSpec> {
+        let built = section.build();
+        assert_eq!(built.len(), 1, "debe haber exactamente 1 submenú");
+        match built.into_iter().next().unwrap() {
+            Section::Submenu { items, .. } => items,
+            _ => panic!("se esperaba un submenú"),
+        }
+    }
+
+    #[test]
+    fn microphone_section_marks_auto_active_when_none() {
+        let sec = MicrophoneSection::new(
+            vec![MicDevice {
+                name: "USB Mic".into(),
+                is_default: true,
+            }],
+            None,
+            UiLanguage::Es,
+        );
+        let items = mic_items(&sec);
+        assert_eq!(items[0].id, "mic_auto");
+        assert!(items[0].label.starts_with("✓ "));
+        // Dispositivo NO debe tener marca (auto está activo).
+        assert!(items.iter().any(|i| i.id == "mic:USB Mic"));
+        let usb = items.iter().find(|i| i.id == "mic:USB Mic").unwrap();
+        assert!(!usb.label.starts_with("✓ "));
+    }
+
+    #[test]
+    fn microphone_section_marks_selected_device_active() {
+        let sec = MicrophoneSection::new(
+            vec![
+                MicDevice {
+                    name: "USB Mic".into(),
+                    is_default: true,
+                },
+                MicDevice {
+                    name: "Headset".into(),
+                    is_default: false,
+                },
+            ],
+            Some("Headset".into()),
+            UiLanguage::Es,
+        );
+        let items = mic_items(&sec);
+        // Auto NO activo.
+        assert!(!items[0].label.starts_with("✓ "));
+        // "Headset" activo.
+        let headset = items.iter().find(|i| i.id == "mic:Headset").unwrap();
+        assert!(headset.label.starts_with("✓ "));
+        assert!(headset.label.contains("← activo"));
+        // "USB Mic" (default) NO activo y debe llevar la marca "(default)".
+        let usb = items.iter().find(|i| i.id == "mic:USB Mic").unwrap();
+        assert!(!usb.label.starts_with("✓ "));
+        assert!(usb.label.contains("(default)"));
+    }
+
+    #[test]
+    fn microphone_section_shows_empty_message_when_no_devices() {
+        let sec = MicrophoneSection::new(Vec::new(), None, UiLanguage::Es);
+        let items = mic_items(&sec);
+        // 1 auto + 1 empty (deshabilitado) + 1 separator + 1 reprobe = 4
+        assert_eq!(items.len(), 4);
+        assert!(items[1].label.contains("No se detectaron"));
+        assert!(!items[1].enabled);
+        assert_eq!(items[3].id, "mic_reprobe");
+    }
+
+    #[test]
+    fn microphone_section_in_default_sections() {
+        let (_tmp, dir) = empty_models_dir();
+        let mut ctx = BuildContext::initial(dir, "ggml-base.bin");
+        ctx.input_devices = vec![MicDevice {
+            name: "USB Mic".into(),
+            is_default: true,
+        }];
+        ctx.input_device = Some("USB Mic".into());
+        let sections = default_sections(&ctx);
+        let mic = sections
+            .iter()
+            .find(|s| s.id() == "microphone")
+            .expect("MicrophoneSection debe estar en default_sections");
+        let items = mic_items_as_dyn(mic.as_ref());
+        assert!(items.iter().any(|i| i.id == "mic:USB Mic"));
+        assert!(items.iter().any(|i| i.id == "mic_auto"));
+        assert!(items.iter().any(|i| i.id == "mic_reprobe"));
+    }
+
+    /// Helper para extraer items de un `&dyn MenuSection` en los tests
+    /// que operan sobre la composición (no sobre el struct concreto).
+    fn mic_items_as_dyn(section: &dyn MenuSection) -> Vec<MenuItemSpec> {
+        let built = section.build();
+        assert_eq!(built.len(), 1);
+        match built.into_iter().next().unwrap() {
+            Section::Submenu { items, .. } => items,
+            _ => panic!("se esperaba un submenú"),
         }
     }
 }

@@ -77,6 +77,16 @@ pub enum MenuAction {
     /// en el mismo handler que un click sobre el submenú Modelos: si
     /// está instalado se activa, si no se descarga y luego se activa.
     FixModelLanguage(String),
+    /// Click sobre un dispositivo del submenú "Micrófono". El `String`
+    /// es el nombre exacto del dispositivo (lo que devuelve
+    /// `cpal::Device::description().name()`). Cadena vacía = "Auto"
+    /// (default del OS). El bin reconstruye el `CaptureSource`.
+    SetInputDevice(String),
+    /// Click sobre el item "Re-probar micrófonos". El bin lanza el
+    /// sondeo de calidad en un thread dedicado y, si encuentra un
+    /// dispositivo con mejor señal, aplica `SetInputDevice` con el
+    /// nombre ganador.
+    ProbeMicrophones,
 }
 
 /// Trait `Tray` (antes en `oido-platform::traits`).

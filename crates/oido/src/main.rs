@@ -15,13 +15,14 @@ use oido_hotkey::{parse as parse_hotkey, GatedHotkey, Hotkey};
 use oido_input::{ArboardInjector, DirectInjector, SmartInjector};
 use oido_stt::{GpuConfig, SharedTranscriber, Transcriber, WhisperCpp};
 use oido_tray::{
-    default_sections, enable_dpi_awareness, BuildContext, MenuAction, PlatformTray, Tray, TrayState,
+    default_sections, enable_dpi_awareness, BuildContext, MenuAction, MicDevice, PlatformTray,
+    Tray, TrayState,
 };
 // `show_model_prompt_windows` sólo existe en la rama windows de oido-tray.
-#[cfg(target_os = "windows")]
-use oido_tray::show_model_prompt_windows;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use oido_tray::mismatch_tooltip;
+#[cfg(target_os = "windows")]
+use oido_tray::show_model_prompt_windows;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -64,9 +65,24 @@ fn detect_model_lang_mismatch(snap: &Config) -> Option<String> {
 /// Construye el `BuildContext` del menú a partir del snapshot actual de
 /// la config. Centraliza el cálculo de `model_lang_mismatch` para que
 /// todos los call sites (initial startup, `SetTheme`, `SetSttMode`,
-/// `SetUiLanguage`, `SetPromptPreset`, `RefreshMenu`) reflejen el
-/// mismo estado sin duplicar lógica.
+/// `SetUiLanguage`, `SetPromptPreset`, `SetInputDevice`, `RefreshMenu`)
+/// reflejen el mismo estado sin duplicar lógica.
+///
+/// Enumera los dispositivos de entrada con
+/// `oido_audio::list_input_devices()` y los proyecta al tipo
+/// `MicDevice` que `oido-tray` espera (cpal no es dependencia directa
+/// de `oido-tray`). El coste es ~un sysctl: para no penalizar el
+/// render del menú, esta enumeración se hace en cada `build_ctx`
+/// pero se cachea por el OS en su propio hot-path.
 fn build_ctx(snap: &Config) -> BuildContext {
+    let devices = oido_audio::list_input_devices();
+    let input_devices: Vec<MicDevice> = devices
+        .into_iter()
+        .map(|d| MicDevice {
+            name: d.name,
+            is_default: d.is_default,
+        })
+        .collect();
     BuildContext {
         models_dir: resolve_models_dir(),
         active_model: snap.model.clone(),
@@ -77,6 +93,8 @@ fn build_ctx(snap: &Config) -> BuildContext {
         prompt_custom_text: snap.system_prompt.clone(),
         effort: snap.effort,
         model_lang_mismatch: detect_model_lang_mismatch(snap),
+        input_devices,
+        input_device: snap.input_device.clone(),
     }
 }
 
@@ -248,6 +266,22 @@ fn main() -> Result<()> {
         }
         changed = true;
         tracing::info!(?snap.prompt_preset, "system prompt actualizado por CLI");
+    }
+
+    if let Some(ref mic) = cli.set_mic {
+        if mic.is_empty() {
+            // `--set-mic ""` resetea a modo automático (default del OS).
+            snap.input_device = None;
+        } else {
+            // Si el nombre no matchea ningún dispositivo detectado, lo
+            // persistimos igual (el usuario puede haber conectado un
+            // mic que aún no está enchufado, o querer un nombre
+            // "diferente al del OS"); el bin hará `tracing::warn!` y
+            // caerá al default al construir el CpalCapture.
+            snap.input_device = Some(mic.clone());
+        }
+        changed = true;
+        tracing::info!(?snap.input_device, "micrófono actualizado por CLI");
     }
 
     if changed {
@@ -572,6 +606,15 @@ fn main() -> Result<()> {
                         MenuAction::Exit => {
                             let _ = control_tx_for_menu.send(ControlMessage::Exit);
                         }
+                        MenuAction::SetInputDevice(name) => {
+                            // El submenú manda "" para el item "Automático".
+                            let resolved = if name.is_empty() { None } else { Some(name) };
+                            let _ = control_tx_for_menu
+                                .send(ControlMessage::SetInputDevice(resolved));
+                        }
+                        MenuAction::ProbeMicrophones => {
+                            let _ = control_tx_for_menu.send(ControlMessage::ProbeMicrophones);
+                        }
                     }
                 }
             })?;
@@ -594,9 +637,11 @@ fn main() -> Result<()> {
                                tr_opt: &Option<Arc<dyn Transcriber>>,
                                st_opt: &Option<oido_stt::LocalAgreementStreamer>,
                                shared_opt: &Option<Arc<SharedTranscriber>>,
-                               is_downloading: bool|
+                               is_downloading: bool,
+                               input_device: Option<&str>|
           -> Result<(ActivePipeline, JoinHandle<()>)> {
-        let capture = Box::new(CpalCapture::new().context("init captura audio")?);
+        let capture =
+            Box::new(CpalCapture::with_device(input_device).context("init captura audio")?);
         // `GatedHotkey` envuelve el `RdevHotkey` y suprime los callbacks
         // de press/release hasta que se llame `mark_ready()` en el handle
         // compartido. Esto implementa la carga lazy: el pipeline se
@@ -617,17 +662,13 @@ fn main() -> Result<()> {
         // Cadena de inyección: UIAutomation (Windows-only, respeta el caret)
         // con fallback transparente a clipboard+Ctrl+V. En macOS/Linux el
         // backend stub devuelve Unsupported y caemos directo al fallback.
-        let direct: Option<Arc<dyn DirectInjector>> =
-            match oido_input::UiaDirectInjector::new() {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    tracing::warn!(
-                        ?e,
-                        "UIA direct injector no inicializado; solo clipboard",
-                    );
-                    None
-                }
-            };
+        let direct: Option<Arc<dyn DirectInjector>> = match oido_input::UiaDirectInjector::new() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(?e, "UIA direct injector no inicializado; solo clipboard",);
+                None
+            }
+        };
         let injector: Arc<dyn oido_input::Injector> =
             Arc::new(SmartInjector::new(direct, clipboard));
 
@@ -929,6 +970,7 @@ fn main() -> Result<()> {
         &streamer,
         &shared_transcriber,
         is_downloading_at_startup,
+        snap.input_device.as_deref(),
     ) {
         Ok((pipe, obs)) => {
             pipeline_opt = Some(pipe);
@@ -1041,6 +1083,7 @@ fn main() -> Result<()> {
                         &streamer,
                         &shared_transcriber,
                         false,
+                        snap.input_device.as_deref(),
                     ) {
                         Ok((pipe, obs)) => {
                             pipeline_opt = Some(pipe);
@@ -1171,6 +1214,7 @@ fn main() -> Result<()> {
                             &streamer,
                             &shared_transcriber,
                             false,
+                            snap.input_device.as_deref(),
                         ) {
                             Ok((pipe, obs)) => {
                                 pipeline_opt = Some(pipe);
@@ -1203,6 +1247,110 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                }
+                ControlMessage::SetInputDevice(new_device) => {
+                    // Persistir el cambio de micrófono. Es destructivo a
+                    // nivel de config: si el dispositivo elegido ya no
+                    // existe, `CpalCapture::with_device` emite un warn
+                    // y cae al default. El snapshot+save mantiene la
+                    // intención del usuario para el próximo arranque.
+                    let mut snap = cfg.snapshot();
+                    if snap.input_device != new_device {
+                        snap.input_device = new_device.clone();
+                        cfg.replace(snap.clone());
+                        if let Err(e) = cfg.save() {
+                            tracing::error!(?e, "no se pudo guardar la configuración de micrófono");
+                        } else {
+                            tracing::info!(
+                                device = ?snap.input_device,
+                                "micrófono actualizado persistentemente"
+                            );
+                        }
+
+                        // Reconstruir el pipeline para que el cambio
+                        // tome efecto YA. El modelo no se recarga (es
+                        // un cambio de captura, no de STT). Mismo
+                        // patrón que `ChangeHotkey`.
+                        if let Some(mut pipe) = pipeline_opt.take() {
+                            let _ = pipe.shutdown();
+                        }
+                        if let Some(obs) = observer_handle.take() {
+                            let _ = obs.join();
+                        }
+                        let snap_for_restart = cfg.snapshot();
+                        match start_pipeline(
+                            &current_binding,
+                            snap_for_restart.stt_mode,
+                            &transcriber,
+                            &streamer,
+                            &shared_transcriber,
+                            false,
+                            snap_for_restart.input_device.as_deref(),
+                        ) {
+                            Ok((pipe, obs)) => {
+                                pipeline_opt = Some(pipe);
+                                observer_handle = Some(obs);
+                                if let Some(ref mut t) = tray {
+                                    let theme = snap_for_restart.theme;
+                                    let _ = t.set_state(TrayState::Idle, theme);
+                                    let sections = default_sections(&build_ctx(&snap_for_restart));
+                                    if let Err(e) = t.rebuild_menu(sections) {
+                                        tracing::error!(
+                                            ?e,
+                                            "no se pudo reconstruir el menú tras cambio de micrófono"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    ?e,
+                                    "no se pudo reiniciar el pipeline tras cambio de micrófono"
+                                );
+                            }
+                        }
+                    }
+                }
+                ControlMessage::ProbeMicrophones => {
+                    // El sondeo bloquea (captura 1s × N dispositivos);
+                    // lo lanzamos en un thread dedicado para no
+                    // congelar el message loop del main. Al terminar,
+                    // el thread envía el resultado por el canal de
+                    // control (que ya está siendo drenado por este
+                    // mismo loop). Mientras dure, ponemos el tray en
+                    // estado Loading para feedback visual.
+                    if let Some(ref mut t) = tray {
+                        let _ = t.set_state(TrayState::Loading, cfg.snapshot().theme);
+                    }
+                    let control_tx_for_probe = control_tx.clone();
+                    let _ = thread::Builder::new()
+                        .name("oido-mic-probe".into())
+                        .spawn(move || {
+                            // 1s por dispositivo es suficiente para
+                            // distinguir silencio digital (-inf) de
+                            // señal real (-50..-35 dBFS ambiente).
+                            let probes = oido_audio::probe_devices(1000);
+                            match oido_audio::pick_best_device(&probes) {
+                                Some(best) => {
+                                    tracing::info!(device = %best, "sondeo: ganador");
+                                    let _ = control_tx_for_probe
+                                        .send(ControlMessage::SetInputDevice(Some(best)));
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "sondeo: ningún dispositivo devolvió señal; sin cambios"
+                                    );
+                                    // Volver al estado Idle sin tocar
+                                    // la config. El handler de
+                                    // SetInputDevice no se invoca.
+                                    // Forzamos el estado del icono
+                                    // para que no quede en "Loading"
+                                    // indefinidamente.
+                                    let _ = control_tx_for_probe
+                                        .send(ControlMessage::SetTrayState(TrayState::Idle));
+                                }
+                            }
+                        });
                 }
                 ControlMessage::Exit => {
                     should_exit = true;
@@ -1279,10 +1427,7 @@ fn main() -> Result<()> {
                         snap.effort = preset;
                         cfg.replace(snap.clone());
                         if let Err(e) = cfg.save() {
-                            tracing::error!(
-                                ?e,
-                                "no se pudo guardar la configuración de esfuerzo"
-                            );
+                            tracing::error!(?e, "no se pudo guardar la configuración de esfuerzo");
                         } else {
                             tracing::info!(?preset, "esfuerzo de decodificación actualizado");
                         }
