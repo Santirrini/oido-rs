@@ -31,8 +31,20 @@ pub(crate) fn has_no_bin_files(models_dir: &Path) -> bool {
 /// a partir del `Config`. El default es bilingüe ES/EN para anclar el
 /// idioma de salida y reducir alucinaciones a un tercer idioma.
 ///
-/// - `BilingualEsEn`: texto fijo.
-/// - `SpanishOnly` / `EnglishOnly`: textos monolingües cortos.
+/// Principios de diseño del initial prompt (whisper.cpp):
+/// - Debe estar en el MISMO idioma que `set_language`: si dictamos en
+///   español, el prompt también debe ser español. Un prompt en inglés
+///   con `language=es` mezcla distribuciones y degrada la calidad
+///   (confunde "¿Hay" con "¿Has", signos invertidos, etc.).
+/// - Incluir ejemplos de la puntuación característica del idioma
+///   (`¿?`, `¡!` en español) ancla esos signos al decoder para que los
+///   reproduzca en lugar de omitirlos o sustituirlos.
+/// - Frase natural completa: ni muy corta (no ancla) ni muy larga
+///   (consume contexto). Sin trailing space al final.
+///
+/// - `BilingualEsEn`: texto fijo con signos `¿?` en la parte española.
+/// - `SpanishOnly`: monolingüe con `¿?` para anclar puntuación invertida.
+/// - `EnglishOnly`: monolingüe corto.
 /// - `Custom`: el texto crudo de `Config::system_prompt`. Si está
 ///   vacío, devolvemos el bilingüe (no se inyecta prompt vacío: eso
 ///   dispara alucinaciones distintas a las de no-pasar-prompt). La
@@ -42,18 +54,18 @@ pub(crate) fn has_no_bin_files(models_dir: &Path) -> bool {
 pub(crate) fn resolve_prompt_text(snap: &oido_config::Config) -> String {
     use oido_config::PromptPreset;
     match snap.prompt_preset {
-        PromptPreset::BilingualEsEn => "Hola, voy a dictar en español e inglés. \
+        PromptPreset::BilingualEsEn => "Hola, ¿hablas español? Voy a dictar en español e inglés. \
              Hello, I will dictate in Spanish and English."
             .to_string(),
-        PromptPreset::SpanishOnly => "Hola, voy a dictar en español. ".to_string(),
-        PromptPreset::EnglishOnly => "Hello, I will dictate in English. ".to_string(),
+        PromptPreset::SpanishOnly => "Hola, ¿cómo estás? Voy a dictar en español.".to_string(),
+        PromptPreset::EnglishOnly => "Hello. I will dictate in English.".to_string(),
         PromptPreset::Custom => {
             if snap.system_prompt.is_empty() {
                 tracing::warn!(
                     "prompt_preset=Custom pero system_prompt vacío; \
                      cayendo al preset bilingüe por defecto"
                 );
-                "Hola, voy a dictar en español e inglés. \
+                "Hola, ¿hablas español? Voy a dictar en español e inglés. \
                  Hello, I will dictate in Spanish and English."
                     .to_string()
             } else {
