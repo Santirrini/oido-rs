@@ -75,6 +75,67 @@ jobs:
       - name: cargo doc
         run: cargo doc --workspace --no-deps --quiet
 
+  build-updater:
+    # El bin `oido` con la feature `updater` activa incluye el path de
+    # auto-update (oido-updater, scheduler, Ed25519 verify, msiexec). Sin
+    # este job, ese código sólo se compila en `release.yml` (es decir,
+    # sólo justo antes de publicar a GitHub Releases). Cualquier rotura
+    # del path de updates pasa desapercibida hasta release-time, lo cual
+    # bloquea hotfixes. Compilamos en CI con la misma feature.
+    #
+    # Matrix pequeño (ubuntu + windows) porque `cargo clippy --features`
+    # ya cubre la mayoría de la lógica; macOS se testea en el matrix
+    # principal sin updater (la rama mac está stub explícito).
+    name: build / clippy / nextest (--features updater)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install system deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            cmake \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libxdo-dev \
+            libxkbcommon-dev \
+            libxss-dev \
+            libayatana-appindicator3-dev \
+            pkg-config
+
+      - name: cargo build (with updater)
+        run: cargo build --verbose -p oido --features updater
+
+      - name: cargo clippy (with updater)
+        run: cargo clippy -p oido --features updater --all-targets -- -D warnings
+
+      - name: Install nextest
+        run: cargo install cargo-nextest --locked --version 0.9.95
+
+      - name: cargo nextest (with updater)
+        # Tests del crate oido-updater (incluye verify, scheduler,
+        # backend). El bin `oido` con la feature activa sólo se compila;
+        # sus tests requerirían GUI + audio + IP mocks, fuera de scope.
+        run: cargo nextest run -p oido-updater --features updater --no-fail-fast
+
   deny:
     name: cargo deny
     runs-on: ubuntu-latest

@@ -5,21 +5,46 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Auto-updater MSI del bin `oido` (self_update + reqwest + SHA256 verify)."
+description = "Auto-updater modular del bin `oido`. Core (GitHub fetch + verify) + backends instaladores por plataforma + scheduler en background."
 
 [lints]
 workspace = true
 
 [features]
 default = ["updater"]
-# La crate sólo contiene código de update cuando esta feature está
+# La crate solo contiene código de update cuando esta feature está
 # activa. Mantiene al bin `oido` ligero en builds sin updater.
-updater = ["dep:self_update", "dep:reqwest", "dep:sha2", "dep:hex", "dep:serde"]
+updater = [
+    "dep:self_update",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:minisign-verify",
+    "dep:tracing",
+]
 
 [dependencies]
-anyhow.workspace = true
+# Errores (cumple AGENTS.md: crates -> thiserror, no anyhow).
+thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
+crossbeam-channel = { workspace = true }
+# Estado en disco (UpdateConfig vive en `oido-config` para evitar
+# duplicar su `Mutex`; aquí solo necesitamos leerlo vía su API pública).
+
+# Núcleo de fetch + verify.
 self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls"], optional = true }
 reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+# Verificación de firma minisign/Ed25519 sobre sidecar `.minisig` de la release.
+# Licencia ISC (ya en allow-list de deny.toml). Wildcards=deny -> pin exacto.
+minisign-verify = { version = "0.2", optional = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }
+tempfile = { workspace = true }

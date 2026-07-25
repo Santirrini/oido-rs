@@ -46,5 +46,20 @@ $msiPath = "installer/dist/oido-$version.msi"
 $hash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
 "$hash  oido-$version.msi" | Out-File -FilePath "installer/dist/oido-$version.msi.sha256" -Encoding ascii
 
+# 7. Firma Ed25519 con minisign (opcional; CI la hace con secret).
+#    Si `MINISIGN_PRIVATE_KEY` está en env y `minisign.exe` en PATH,
+#    genera `oido-$version.msi.minisig`. El binario embebido rechaza
+#    updates sin firma válida (ver `oido-updater::verify_minisign`).
+if ($env:MINISIGN_PRIVATE_KEY -and (Get-Command minisign.exe -ErrorAction SilentlyContinue)) {
+    Write-Host "Signing MSI with minisign (Ed25519)..."
+    $keyPath = Join-Path $env:TEMP "oido-updater-$version.key"
+    Set-Content -Path $keyPath -Value $env:MINISIGN_PRIVATE_KEY -NoNewline -Encoding ASCII
+    & minisign.exe -Sm $msiPath -s $keyPath -t "oido updater release v$version"
+    Remove-Item -Path $keyPath -Force -ErrorAction SilentlyContinue
+} else {
+    Write-Host "MINISIGN_PRIVATE_KEY no presente o minisign.exe no instalado; release sin firma Ed25519." -ForegroundColor Yellow
+    Write-Host "  En CI (.github/workflows/release.yml) este paso se ejecuta con el secret." -ForegroundColor Yellow
+}
+
 Write-Host "MSI Installer successfully built at installer/dist/oido-$version.msi"
 Pop-Location

@@ -1,10 +1,13 @@
 //! Bin CLI `oido`. Punto de entrada delgado: tras el refactor
 //! modular profundo este archivo solo orquesta. La lógica vive en
 //! módulos hermanos (cli, control, models_setup, model_lifecycle,
-//! diagnostics, runtime, hotkey_setup).
+//! diagnostics, runtime, hotkey_setup, update_settings).
 
 #[cfg(feature = "updater")]
 use oido_updater as updater;
+
+#[cfg(feature = "updater")]
+mod update_settings;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -149,7 +152,12 @@ fn main() -> Result<()> {
         #[cfg(feature = "updater")]
         {
             tracing::info!("Buscando actualizaciones...");
-            match updater::check_and_apply() {
+            // CLI one-shot: usa el backend nativo del SO.
+            #[cfg(target_os = "windows")]
+            let backend = updater::WindowsMsiBackend::new();
+            #[cfg(not(target_os = "windows"))]
+            let backend = updater::MacosPkgBackend; // stub hoy
+            match updater::check_and_apply(&backend) {
                 Ok(updater::Status::UpToDate) => {
                     tracing::info!("La aplicación ya está actualizada.");
                 }
@@ -500,8 +508,7 @@ fn main() -> Result<()> {
                                 control_tx_for_menu.send(ControlMessage::SetPromptPreset(preset));
                         }
                         MenuAction::SetEffort(preset) => {
-                            let _ =
-                                control_tx_for_menu.send(ControlMessage::SetEffort(preset));
+                            let _ = control_tx_for_menu.send(ControlMessage::SetEffort(preset));
                         }
                         MenuAction::EditPrompt => {
                             // Abrir el config.json del usuario en el editor
@@ -573,31 +580,38 @@ fn main() -> Result<()> {
                         MenuAction::CheckUpdates => {
                             #[cfg(feature = "updater")]
                             {
-                                tracing::info!("Iniciando búsqueda de actualizaciones en background...");
+                                tracing::info!("Búsqueda manual de actualizaciones iniciada...");
                                 let control_tx_clone = control_tx_for_menu.clone();
                                 let _ = thread::Builder::new()
                                     .name("oido-updater-bg".into())
                                     .spawn(move || {
-                                        let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Loading));
-                                        match updater::check_and_apply() {
-                                            Ok(updater::Status::UpToDate) => {
-                                                tracing::info!("La aplicación ya está actualizada.");
-                                                let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Idle));
-                                            }
-                                            Ok(updater::Status::DownloadedAndInstalling { version }) => {
-                                                tracing::info!("Nueva versión v{} descargada e instalando en background.", version);
-                                                let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Idle));
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Error buscando/aplicando actualizaciones en background: {:?}", e);
-                                                let _ = control_tx_clone.send(ControlMessage::SetTrayState(TrayState::Error));
-                                            }
-                                        }
+                                        let _ = control_tx_clone
+                                            .send(ControlMessage::SetTrayState(TrayState::Loading));
+                                        // Check + install one-shot. El
+                                        // scheduler en background usa el
+                                        // mismo `check_and_apply` vía
+                                        // `emit_one_shot_check` cuando el
+                                        // usuario quiere instalar.
+                                        let event = updater::emit_one_shot_check(
+                                            &updater::WindowsMsiBackend::new(),
+                                            true,
+                                        );
+                                        let _ = control_tx_clone
+                                            .send(ControlMessage::UpdateEvent(event));
+                                        // Restaurar el estado del tray
+                                        // cuando termina el check (success
+                                        // o fail). El handler de
+                                        // UpdateEvent ya ajusta el
+                                        // tooltip.
+                                        let _ = control_tx_clone
+                                            .send(ControlMessage::SetTrayState(TrayState::Idle));
                                     });
                             }
                             #[cfg(not(feature = "updater"))]
                             {
-                                tracing::warn!("El actualizador automático no está habilitado en esta build.");
+                                tracing::warn!(
+                                    "El actualizador automático no está habilitado en esta build."
+                                );
                             }
                         }
                         MenuAction::TogglePause => {
@@ -609,8 +623,8 @@ fn main() -> Result<()> {
                         MenuAction::SetInputDevice(name) => {
                             // El submenú manda "" para el item "Automático".
                             let resolved = if name.is_empty() { None } else { Some(name) };
-                            let _ = control_tx_for_menu
-                                .send(ControlMessage::SetInputDevice(resolved));
+                            let _ =
+                                control_tx_for_menu.send(ControlMessage::SetInputDevice(resolved));
                         }
                         MenuAction::ProbeMicrophones => {
                             let _ = control_tx_for_menu.send(ControlMessage::ProbeMicrophones);
@@ -1003,6 +1017,68 @@ fn main() -> Result<()> {
         elapsed_ms = startup_total.elapsed().as_millis() as u64,
         "startup completo; bin listo para dictar"
     );
+
+    // Lanzar el scheduler de updates (Fase 5). Sólo se compila con la
+    // feature `updater`. Sigue el patrón canónico del codebase:
+    // thread dedicado + comunicación por canal crossbeam (R1). El
+    // thread es fire-and-forget como `oido-downloader`.
+    #[cfg(feature = "updater")]
+    {
+        use update_settings::ConfigStoreUpdateSettings;
+        // Canal separado bounded(16) hacia el bin: el scheduler no
+        // comparte `control_tx` directamente porque su tipo es
+        // `UpdateEvent`, no `ControlMessage`. Lo adaptamos
+        // envolviendo el sender en un closure que serializa a
+        // `ControlMessage::UpdateEvent`.
+        let (update_tx, update_rx) = crossbeam_channel::bounded::<updater::UpdateEvent>(16);
+        // Adapter: del canal del scheduler al `control_tx` del bin.
+        // Spawned en su propio thread (pump) para no bloquear el
+        // control loop principal en el `recv()`.
+        let control_tx_for_pump = control_tx.clone();
+        let _ = thread::Builder::new()
+            .name("oido-update-pump".into())
+            .spawn(move || {
+                while let Ok(event) = update_rx.recv() {
+                    if control_tx_for_pump
+                        .send(ControlMessage::UpdateEvent(event))
+                        .is_err()
+                    {
+                        break; // bin cerrando
+                    }
+                }
+            });
+
+        // Elegir el backend según la plataforma. Hoy sólo Windows
+        // está implementado; en otros OS devolvemos `UnsupportedPlatform`
+        // y el scheduler simplemente reporta el error si intenta
+        // instalar (no bloquea el check).
+        let backend: Box<dyn updater::InstallerBackend> = {
+            #[cfg(target_os = "windows")]
+            {
+                Box::new(updater::WindowsMsiBackend::new())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Box::new(updater::MacosPkgBackend) // stub; ver `windows.rs`.
+            }
+        };
+
+        let _scheduler = match updater::UpdateScheduler::builder()
+            .settings(Box::new(ConfigStoreUpdateSettings(Arc::clone(&cfg))))
+            .event_sender(update_tx)
+            .backend(backend)
+            .spawn()
+        {
+            Ok(handle) => {
+                tracing::info!("update scheduler spawneado");
+                Some(handle)
+            }
+            Err(e) => {
+                tracing::error!(?e, "no se pudo arrancar el scheduler de updates");
+                None
+            }
+        };
+    }
 
     // Instalar handler de Ctrl+C redirigiéndolo a nuestro canal de control
     let control_tx_ctrlc = control_tx.clone();
@@ -1471,6 +1547,68 @@ fn main() -> Result<()> {
                         shared_transcriber.as_ref(),
                         &control_tx,
                     );
+                }
+                ControlMessage::SetUpdateTooltip(text) => {
+                    // Tooltip persistente del tray (ortogonal al
+                    // icono de estado). Vacío = limpiar. Solo Win/macOS
+                    // implementan; Linux es no-op (ver oido-tray traits).
+                    if let Some(ref mut t) = tray {
+                        if let Err(e) = t.set_tooltip(&text) {
+                            tracing::debug!(?e, "set_tooltip");
+                        }
+                    }
+                }
+                #[cfg(feature = "updater")]
+                ControlMessage::UpdateEvent(event) => {
+                    use updater::UpdateEvent as E;
+                    match event {
+                        E::UpToDate => {
+                            tracing::info!(kind = "up_to_date", "scheduler: up to date");
+                        }
+                        E::UpdateAvailable {
+                            version,
+                            current: _,
+                        } => {
+                            tracing::info!(
+                                kind = "update_available",
+                                version = %version,
+                                "scheduler: hay update"
+                            );
+                            let _ = control_tx.send(ControlMessage::SetUpdateTooltip(format!(
+                                "Nueva versión v{version} — reinicia para aplicar"
+                            )));
+                        }
+                        E::Updated { version } => {
+                            tracing::info!(
+                                kind = "updated",
+                                version = %version,
+                                "update instalado; esperando relaunch"
+                            );
+                            let _ = control_tx.send(ControlMessage::SetUpdateTooltip(format!(
+                                "Actualizado a v{version}. Cierra y relanza la app."
+                            )));
+                        }
+                        E::Skipped { version } => {
+                            tracing::debug!(
+                                kind = "skipped",
+                                version = %version,
+                                "usuario marcó 'no molestar'"
+                            );
+                        }
+                        E::Failed { reason } => {
+                            tracing::error!(
+                                kind = "failed",
+                                reason = %reason,
+                                "update falló"
+                            );
+                            // No bloqueamos el icono de estado en
+                            // Error: el usuario puede seguir dictando.
+                            // El tooltip muestra el detalle.
+                            let _ = control_tx.send(ControlMessage::SetUpdateTooltip(format!(
+                                "Update falló: {reason}"
+                            )));
+                        }
+                    }
                 }
             }
         }

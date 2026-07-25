@@ -145,6 +145,66 @@ fn default_input_device() -> Option<String> {
     None
 }
 
+/// Configuración del auto-updater.
+///
+/// Vive dentro de `Config` (con `#[serde(default)]` a nivel campo)
+/// para que un `config.json` viejo siga funcionando: al deserializar
+/// un archivo sin la sección `update`, serde rellena con
+/// `UpdateConfig::default()`.
+///
+/// Diseño:
+/// - **`auto_update`**: si está apagado, el scheduler de `oido-updater`
+///   no chequea nunca en background. El usuario puede seguir
+///   disparándolo manualmente desde el menú "Buscar actualizaciones".
+/// - **`check_interval_hours`**: intervalo entre checks automáticos.
+///   Default 24h. Mínimo efectivo ~1h para no martillar GitHub.
+/// - **`channel`**: nombre del canal de release (hoy sólo `"stable"`).
+///   Estructura para futuro `"beta"` / `"nightly"` sin cambio de
+///   schema.
+/// - **`last_check`**: epoch segundos del último check (sea UpToDate
+///   o no). El scheduler lo usa para decidir "¿toca chequear ya?".
+///   `None` = nunca se chequeó.
+/// - **`skipped_version`**: si el usuario clickea "no molestar con
+///   vX", el scheduler deja de reportar esa versión hasta que salga
+///   una nueva.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+    #[serde(default = "default_check_interval_hours")]
+    pub check_interval_hours: u32,
+    #[serde(default = "default_update_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub last_check: Option<i64>,
+    #[serde(default)]
+    pub skipped_version: Option<String>,
+}
+
+fn default_auto_update() -> bool {
+    true
+}
+
+fn default_check_interval_hours() -> u32 {
+    24
+}
+
+fn default_update_channel() -> String {
+    "stable".to_string()
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_update: default_auto_update(),
+            check_interval_hours: default_check_interval_hours(),
+            channel: default_update_channel(),
+            last_check: None,
+            skipped_version: None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -196,6 +256,9 @@ pub struct Config {
     /// hace el handler `SetInputDevice` en el bin).
     #[serde(default = "default_input_device")]
     pub input_device: Option<String>,
+    /// Configuración del auto-updater. Ver [`UpdateConfig`].
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
@@ -222,6 +285,7 @@ impl Default for Config {
             system_prompt: default_system_prompt(),
             effort: default_effort_preset(),
             input_device: default_input_device(),
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -412,6 +476,17 @@ mod tests {
                         system_prompt,
                         effort,
                         input_device,
+                        // UpdateConfig se genera fijo con defaults
+                        // arbitrarios. Para roundtrip del campo
+                        // `update`, ver `update_config_roundtrip`. proptest
+                        // no soporta tuplas de 13+ estrategias.
+                        update: UpdateConfig {
+                            auto_update: use_gpu,
+                            check_interval_hours: n_threads.map(|n| n as u32).unwrap_or(24),
+                            channel: "stable".into(),
+                            last_check: None,
+                            skipped_version: None,
+                        },
                     },
                 )
                 .boxed()
@@ -491,6 +566,78 @@ mod tests {
         let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
         let cfg: Config = serde_json::from_str(json).expect("JSON sin input_device debe parsear");
         assert_eq!(cfg.input_device, None);
+    }
+
+    /// Configs previas a la introducción del auto-updater deben
+    /// parsear con `UpdateConfig::default()` completo (auto_update=true,
+    /// interval 24h, sin last_check ni skipped_version).
+    /// Esto es retro-compat para usuarios que actualizan de Fase 5 a
+    /// Fase 6 sin perder comportamiento (auto_update viene en ON).
+    #[test]
+    fn backward_compat_missing_update_field_uses_default() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON sin update debe parsear");
+        assert_eq!(cfg.update, UpdateConfig::default());
+        assert!(cfg.update.auto_update);
+        assert_eq!(cfg.update.check_interval_hours, 24);
+        assert_eq!(cfg.update.channel, "stable");
+        assert!(cfg.update.last_check.is_none());
+        assert!(cfg.update.skipped_version.is_none());
+    }
+
+    /// Defaults de `UpdateConfig`: auto_update=true, 24h, "stable",
+    /// sin last_check ni skipped.
+    #[test]
+    fn update_config_defaults() {
+        let cfg = UpdateConfig::default();
+        assert!(cfg.auto_update);
+        assert_eq!(cfg.check_interval_hours, 24);
+        assert_eq!(cfg.channel, "stable");
+        assert!(cfg.last_check.is_none());
+        assert!(cfg.skipped_version.is_none());
+    }
+
+    /// `UpdateConfig` debe serializarse en JSON como un objeto
+    /// anidado bajo la clave `update` para que el usuario pueda
+    /// editarlo a mano.
+    #[test]
+    fn update_config_serializes_as_nested_object() {
+        let cfg = Config {
+            update: UpdateConfig {
+                auto_update: false,
+                check_interval_hours: 12,
+                channel: "beta".into(),
+                last_check: Some(1_700_000_000),
+                skipped_version: Some("0.5.0".into()),
+            },
+            ..Config::default()
+        };
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let json = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            json.contains("\"update\""),
+            "debe aparecer clave update: {json}"
+        );
+        assert!(json.contains("\"auto_update\":false"));
+        assert!(json.contains("\"check_interval_hours\":12"));
+        assert!(json.contains("\"channel\":\"beta\""));
+        assert!(json.contains("\"last_check\":1700000000"));
+        assert!(json.contains("\"skipped_version\":\"0.5.0\""));
+    }
+
+    /// Roundtrip de `UpdateConfig` con valores arbitrarios.
+    #[test]
+    fn update_config_roundtrip() {
+        let original = UpdateConfig {
+            auto_update: false,
+            check_interval_hours: 6,
+            channel: "nightly".into(),
+            last_check: Some(1_700_000_000),
+            skipped_version: Some("0.4.0".into()),
+        };
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let back: UpdateConfig = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back, original);
     }
 
     /// El campo `input_device` se serializa como `null` cuando es

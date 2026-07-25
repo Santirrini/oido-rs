@@ -46,4 +46,19 @@ pub(crate) enum ControlMessage {
     /// (`oido-mic-probe`) y, si encuentra un dispositivo con mejor
     /// señal, envía un `SetInputDevice` por el canal de control.
     ProbeMicrophones,
+    /// Evento del updater (`oido-updater::UpdateEvent`): el scheduler
+    /// en background notifica que hay update disponible, falló, etc.
+    /// El handler del control loop traduce el evento a tooltip del
+    /// tray y/o `TrayState`. El `UpdateEvent` sólo se construye cuando
+    /// el bin se compila con `--features updater`.
+    #[cfg(feature = "updater")]
+    UpdateEvent(oido_updater::UpdateEvent),
+    /// Cambio explícito de tooltip persistente (sin tocar el icono).
+    /// Usado por el handler de `UpdateEvent` para mostrar
+    /// "Nueva versión vX — reinicia para aplicar". Vacío = limpiar.
+    ///
+    /// El tray tiene un tooltip "transitorio" coexistiendo con el
+    /// icono de estado (set via `set_state`). El tooltip persistente
+    /// es ortogonal y se setea con `set_tooltip`. Vacío = limpiar.
+    SetUpdateTooltip(String),
 }

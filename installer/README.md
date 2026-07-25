@@ -25,13 +25,31 @@ UpgradeCode="B9A8A529-65A0-449D-BBF9-2A835D8B41D8"
 
 ## Auto-Update Verification Keys
 
-Oido verifies the downloaded updater MSI files using public-key cryptography (Ed25519).
+Oido verifica los updates descargados con criptografía de clave pública (Ed25519 via `minisign`). El binario embebe `installer/updater-pubkey.txt` en tiempo de compilación (`include_str!` en `crates/oido-updater/src/verify.rs`). El flujo es:
 
-### How to Generate Keys
-To generate a new key pair for release signing:
-1. Use `minisign` or any compatible Ed25519 key generation tool.
-2. Store the private key in a secure location (e.g., as a GitHub repository secret).
-3. Commit the public key to `installer/updater-pubkey.txt`. It will be embedded into the application executable at compilation time (`crates/oido/src/updater.rs` reads this file using `include_str!`).
+1. **Defensa en profundidad**:
+   - SHA-256 sidecar (`*.msi.sha256`) verifica integridad bit-a-bit.
+   - Firma Ed25519 sidecar (`*.msi.minisig`) verifica **autenticidad**: que el MSI venga realmente del mantenedor y no de un MITM.
+2. **Defense in depth en orden estricto**: SHA-256 primero (rápido, descarta corrupciones), luego Ed25519 (autentica origen). Si cualquiera falla, el update se rechaza con `UpdateError::ChecksumMismatch` o `UpdateError::SignatureInvalid`.
+3. **El binario rechaza** releases sin `.minisig` (configurado en `WindowsMsiBackend::requires_signature() = true`).
+
+### Cómo generar las llaves
+
+```bash
+# 1. Generar el par (en una workstation segura, NO en CI runners compartidos).
+minisign -G -p updater-pubkey.txt -s updater-privkey.key -W
+
+# 2. Confirmar `installer/updater-pubkey.txt` (es público, va al repo).
+
+# 3. La private key:
+#    - Subirla como GitHub Secret `MINISIGN_PRIVATE_KEY` (Settings →
+#      Secrets → Actions → New repository secret).
+#    - NO commitearla al repo. La key actual que estaba en
+#      `installer/updater-privkey.pem` fue removida por estar expuesta;
+#      rotar la key pair antes del próximo release.
+```
+
+El workflow `.github/workflows/release.yml` lee el secret y firma el MSI en CI; `build-msi.ps1` también firma localmente si el secret y `minisign.exe` están disponibles.
 
 ## How to Build the Installer
 Open a PowerShell terminal at the root of the project and execute:

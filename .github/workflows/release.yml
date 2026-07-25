@@ -64,6 +64,38 @@ jobs:
         run: |
           .\installer\build-msi.ps1
 
+      - name: Sign MSI with minisign (Ed25519)
+        shell: powershell
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          # Defensa en profundidad: además del SHA-256 sidecar, el
+          # binario verifica una firma Ed25519 (minisign) sobre el MSI
+          # usando la `PUBLIC_KEY` embebida en
+          # `crates/oido-updater/src/verify.rs`. Si el secret no está
+          # configurado, este step falla loud (no se publica update
+          # sin firma).
+          if (-not $env:MINISIGN_PRIVATE_KEY) {
+              Write-Error "MINISIGN_PRIVATE_KEY secret no configurado. Sin firma no se publica release."
+              exit 1
+          }
+          # minisign no está en el runner por defecto. Descargamos el
+          # release Windows del upstream (jedisct1/minisign).
+          $minisignZip = "$env:RUNNER_TEMP\minisign.zip"
+          Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-win64.zip" -OutFile $minisignZip -UseBasicParsing
+          Expand-Archive -Path $minisignZip -DestinationPath "$env:RUNNER_TEMP\minisign" -Force
+          $env:PATH = "$env:RUNNER_TEMP\minisign;$env:PATH"
+          # Materializar la private key en un tmpfile (minisign CLI
+          # requiere leer de un path). Permisos 600 equivalente en
+          # Windows ACL; usamos `icacls` para denegar acceso a otros.
+          $keyPath = "$env:RUNNER_TEMP\oido-updater.key"
+          Set-Content -Path $keyPath -Value $env:MINISIGN_PRIVATE_KEY -NoNewline -Encoding ASCII
+          $msi = Get-ChildItem -Path installer/dist/*.msi | Select-Object -First 1
+          & minisign -Sm $msi.FullName -s $keyPath -t "oido updater release signing"
+          # Limpieza best-effort (memoria del runner es efímera, pero
+          # igualmente).
+          Remove-Item -Path $keyPath -Force -ErrorAction SilentlyContinue
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -71,6 +103,7 @@ jobs:
           path: |
             installer/dist/*.msi
             installer/dist/*.sha256
+            installer/dist/*.minisig
 
   smoke-test:
     needs: build-msi
