@@ -246,19 +246,24 @@ pub(crate) fn preset_settings(preset: oido_config::EffortPreset) -> EffortSettin
             length_penalty: None,
         },
         // === Robust ===
-        // Greedy best_of=1 + temperature_inc=0.2 (reintenta con
-        // temperatura más alta si la primera pasada falla) +
-        // entropy_thold más estricto para descartar segmentos inseguros.
+        // Greedy best_of=1, temperature_inc=0.0 (sin reintentos),
+        // entropy_thold estricto (1.8) para descartar segmentos
+        // inseguros en vez de reintentar.
         //
-        // Antes usaba best_of=5: cada reintento de temperatura hacía 5
-        // pasadas greedy, causando spikes de 17-20 s en audio ambiguo
-        // (40× más lento que best_of=1). En hold-to-talk la latencia
-        // importa más que exprimir calidad marginal, y el pipeline ya
-        // tiene phrase_filter + single-word guard como red de seguridad.
+        // Evolución de este preset:
+        //   v1: best_of=5, temperature_inc=0.2 → 17-20 s en audio
+        //       ambiguo (5 muestras × 5 reintentos de temperatura).
+        //   v2: best_of=1, temperature_inc=0.2 → 7-10 s (sin sampling
+        //       redundante, pero aún 5 pasadas del decoder por segmento
+        //       cuando la entropía falla).
+        //   v3 (actual): best_of=1, temperature_inc=0.0 → ~450 ms
+        //       consistentes. Sin reintentos del decoder; el pipeline
+        //       tiene phrase_filter + single-word guard como red de
+        //       seguridad post-STT.
         EffortPreset::Robust => EffortSettings {
             strategy: SamplingStrategy::Greedy { best_of: 1 },
             temperature: 0.0,
-            temperature_inc: 0.2,
+            temperature_inc: 0.0,
             entropy_thold: 1.8,
             length_penalty: None,
         },
@@ -902,9 +907,11 @@ mod tests {
             "Robust esperaba entropy=1.8, obtuve {}",
             s_robust.entropy_thold
         );
+        // Robust usa temperature_inc=0.0 (sin reintentos del decoder)
+        // para latencia consistente ~450ms en hold-to-talk.
         assert!(
-            (s_robust.temperature_inc - 0.2).abs() < f32::EPSILON,
-            "Robust esperaba temperature_inc=0.2, obtuve {}",
+            s_robust.temperature_inc.abs() < f32::EPSILON,
+            "Robust esperaba temperature_inc=0.0, obtuve {}",
             s_robust.temperature_inc
         );
 
