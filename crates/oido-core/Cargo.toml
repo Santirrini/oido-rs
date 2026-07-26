@@ -15,5 +15,15 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 oido-stt = { path = "../oido-stt", version = "0.1.0" }
 oido-audio = { path = "../oido-audio", version = "0.1.0" }
+oido-tts = { path = "../oido-tts", version = "0.1.0" }
+oido-config = { path = "../oido-config", version = "0.1.0" }
 oido-hotkey = { path = "../oido-hotkey", version = "0.1.0" }
 oido-input = { path = "../oido-input", version = "0.1.0" }
+unicode-segmentation.workspace = true
+
+# Soporte de TTS (Fase TTS: lectura de selección). Solo necesario si la
+# feature está activa — pero para v1 mantenemos el crate linkado siempre
+# porque ya compila y mantener una feature-flag aquí añade fricción sin
+# ganancia de startup time significativa.
+[dev-dependencies]
+tempfile.workspace = true

@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use oido_config::{EffortPreset, PromptPreset, SttMode, Theme, UiLanguage};
+use oido_config::{EffortPreset, PromptPreset, SttMode, Theme, TtsEngineKind, UiLanguage};
 use oido_models::{ModelEntry, ModelFamily};
 
 use crate::traits::MenuAction;
@@ -750,6 +750,18 @@ pub struct BuildContext {
     /// dispositivo fijado por el usuario. Lo más reciente de
     /// `Config::input_device`.
     pub input_device: Option<String>,
+    /// Sistema TTS habilitado. Lo lee el `TtsSection` para decidir si
+    /// renderiza el submenú "Voz" / "Velocidad" o lo oculta.
+    pub tts_enabled: bool,
+    /// Motor TTS activo (`Kokoro` | `Piper`).
+    pub tts_engine: TtsEngineKind,
+    /// Voz TTS activa (ID canónico como `"af_heart"` o
+    /// `"es_ES-davefx-medium"`).
+    pub tts_voice: String,
+    /// Velocidad TTS como millis de 1.0× (1000 = 1.0×).
+    pub tts_speed_milli: u16,
+    /// Atajo global configurado para la lectura TTS de selección.
+    pub tts_hotkey: String,
 }
 
 impl BuildContext {
@@ -770,6 +782,11 @@ impl BuildContext {
             model_lang_mismatch: None,
             input_devices: Vec::new(),
             input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Piper,
+            tts_voice: "es_ES-davefx-medium".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
         }
     }
 }
@@ -823,10 +840,173 @@ pub fn default_sections(ctx: &BuildContext) -> Vec<Box<dyn MenuSection>> {
         ctx.active_model.clone(),
         ctx.ui_language,
     )));
+    // TTS: SIEMPRE se renderiza, independiente de `ctx.tts_enabled`.
+    // Cuando está desactivado, los items Motor/Voz/Velocidad/Leer ahora
+    // se renderizan con `enabled=false` (gris en el menú nativo) para
+    // dar feedback visual al usuario — un "toggle on" tiene que ser
+    // accesible sin tener que cerrar y reabrir el menú. El único item
+    // habilitado cuando `enabled=false` es el toggle, que actúa como
+    // "puerta de entrada".
+    out.push(Box::new(TtsSection {
+        ui_language: ctx.ui_language,
+        enabled: ctx.tts_enabled,
+        engine: ctx.tts_engine,
+        voice: ctx.tts_voice.clone(),
+        speed_milli: ctx.tts_speed_milli,
+        hotkey: ctx.tts_hotkey.clone(),
+    }));
     out.push(Box::new(ExitSection {
         ui_language: ctx.ui_language,
     }));
     out
+}
+
+// ---------------------------------------------------------------------------
+// TtsSection — submenú "Lectura de selección"
+// ---------------------------------------------------------------------------
+
+/// Subsección de menú que expone el toggle del TTS, selección de motor,
+/// selección de voz, velocidad y el botón "Leer selección ahora".
+///
+/// El catálogo de voces es **estático** por ahora (3 voces Piper + 3
+/// Kokoro del F0 stub). F7 lo reemplazará por descubrimiento dinámico
+/// del `.onnx`/`.onnx.bin` en `models_dir` + parseo del JSON Piper /
+/// del `voices-v1.0.bin` Kokoro.
+pub struct TtsSection {
+    pub ui_language: UiLanguage,
+    pub enabled: bool,
+    pub engine: TtsEngineKind,
+    pub voice: String,
+    pub speed_milli: u16,
+    pub hotkey: String,
+}
+
+const TTS_VOICES_PIPER: &[(&str, &str)] = &[
+    ("es_ES-davefx-medium", "Davefx (es-ES, medium)"),
+    ("es_MX-ald-medium", "Ald (es-MX, medium)"),
+    ("en_US-lessac-medium", "Lessac (en-US, medium)"),
+];
+
+const TTS_VOICES_KOKORO: &[(&str, &str)] = &[
+    ("af_heart", "Heart (en-US, female)"),
+    ("am_michael", "Michael (en-US, male)"),
+    ("bf_emma", "Emma (en-GB, female)"),
+];
+
+const TTS_SPEEDS: &[(u16, &str)] = &[
+    (500, "0.5x"),
+    (750, "0.75x"),
+    (1000, "1.0x (normal)"),
+    (1250, "1.25x"),
+    (1500, "1.5x"),
+    (2000, "2.0x"),
+];
+
+impl MenuSection for TtsSection {
+    fn id(&self) -> &'static str {
+        "tts"
+    }
+
+    fn build(&self) -> Vec<Section> {
+        // Como `MenuItemSpec` no soporta sub-submenús anidados (el
+        // layout del backend lo prohíbe), emitimos 4 items hermanos
+        // en lugar de uno anidado: Leer ahora / Toggle / Motor / Voz
+        // / Velocidad.
+        //
+        // Cuando `enabled=false` (TTS desactivado por el usuario),
+        // los items Motor/Voz/Velocidad/Leer ahora se renderizan con
+        // `enabled=false` (gris en el menú nativo — UI feedback claro
+        // de que están bloqueados). El único item accionable es el
+        // **toggle**, que actúa como puerta de entrada para reactivar.
+        // Esto evita que "desactivar" esconda la sección completa y
+        // haga imposible volver a activarla sin editar config.json.
+        let mut items: Vec<MenuItemSpec> = Vec::new();
+
+        // Item directo: "Leer selección AHORA" (atajo al hotkey).
+        // Solo accionable si TTS está activado.
+        let read_now_label = if self.hotkey.is_empty() {
+            "Leer selección ahora".to_string()
+        } else {
+            format!("Leer selección ahora ({})", self.hotkey)
+        };
+        items.push(MenuItemSpec {
+            id: "tts_read_now".into(),
+            label: read_now_label,
+            enabled: self.enabled,
+        });
+
+        // Toggle on/off — SIEMPRE accionable (es la puerta de entrada
+        // cuando TTS está desactivado).
+        items.push(MenuItemSpec {
+            id: "tts_toggle".into(),
+            label: format!(
+                "{}  TTS: {}",
+                check_or_blank(self.enabled),
+                if self.enabled { "on" } else { "off (click para activar)" }
+            ),
+            enabled: true,
+        });
+
+        // Submenú "Motor TTS". Solo accionable si TTS está activado.
+        items.push(MenuItemSpec {
+            id: "tts_engine_submenu".into(),
+            label: format!(
+                "Motor TTS: {}",
+                engine_short_label(self.engine)
+            ),
+            enabled: self.enabled,
+        });
+
+        // Submenú "Voz TTS".
+        items.push(MenuItemSpec {
+            id: "tts_voice_submenu".into(),
+            label: format!(
+                "Voz TTS: {}",
+                voice_short_label(&self.voice)
+            ),
+            enabled: self.enabled,
+        });
+
+        // Submenú "Velocidad TTS".
+        items.push(MenuItemSpec {
+            id: "tts_speed_submenu".into(),
+            label: format!(
+                "Velocidad TTS: {}",
+                speed_short_label(self.speed_milli)
+            ),
+            enabled: self.enabled,
+        });
+
+        vec![Section::Submenu {
+            label: "Lectura de selección (TTS)".into(),
+            items,
+        }]
+    }
+}
+
+/// Etiqueta corta de motor (Kokoro / Piper) usada en items de menú.
+fn engine_short_label(e: TtsEngineKind) -> &'static str {
+    match e {
+        TtsEngineKind::Kokoro => "Kokoro",
+        TtsEngineKind::Piper => "Piper",
+    }
+}
+
+fn voice_short_label(id: &str) -> &str {
+    TTS_VOICES_PIPER
+        .iter()
+        .chain(TTS_VOICES_KOKORO.iter())
+        .find(|(k, _)| *k == id)
+        .map(|(_, v)| *v)
+        .unwrap_or(id)
+}
+
+fn speed_short_label(milli: u16) -> &'static str {
+    TTS_SPEEDS
+        .iter()
+        .find(|(k, _)| *k == milli)
+        .map(|(_, v)| *v)
+        .unwrap_or("?")
 }
 
 // ---------------------------------------------------------------------------
@@ -866,6 +1046,22 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
             MenuAction::SetInputDevice(id[MIC_ITEM_PREFIX.len()..].to_string())
         }
         id if id.starts_with("model:") => MenuAction::ModelItem(id["model:".len()..].to_string()),
+        // ----- TTS -----
+        "tts_read_now" => MenuAction::TtsReadNow,
+        "tts_toggle" => MenuAction::ToggleTts,
+        "tts_engine_kokoro" => MenuAction::SetTtsEngine("kokoro".into()),
+        "tts_engine_piper" => MenuAction::SetTtsEngine("piper".into()),
+        id if id.starts_with("tts_voice_") && id != "tts_voice_submenu" => {
+            MenuAction::SetTtsVoice(id["tts_voice_".len()..].to_string())
+        }
+        id if id.starts_with("tts_speed_") => {
+            // El id es "tts_speed_<milli>". Parseamos el sufijo.
+            let raw = &id["tts_speed_".len()..];
+            match raw.parse::<u16>() {
+                Ok(m) => MenuAction::SetTtsSpeed(m),
+                Err(_) => return None,
+            }
+        }
         _ => return None,
     })
 }
@@ -1006,6 +1202,11 @@ mod tests {
             model_lang_mismatch: None,
             input_devices: Vec::new(),
             input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Piper,
+            tts_voice: "es_ES-davefx-medium".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
         };
         default_sections(&ctx)
     }
@@ -1016,8 +1217,8 @@ mod tests {
         let sections = call_default(dir);
         assert_eq!(
             sections.len(),
-            9,
-            "9 secciones: hotkey, theme, mode, effort, ui_language, prompt, microphone, models, exit"
+            10,
+            "10 secciones: hotkey, theme, mode, effort, ui_language, prompt, microphone, models, tts, exit"
         );
         for s in &sections {
             assert!(
@@ -1099,6 +1300,11 @@ mod tests {
             model_lang_mismatch: None,
             input_devices: Vec::new(),
             input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Piper,
+            tts_voice: "es_ES-davefx-medium".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
         };
         let sections = default_sections(&ctx);
         let sec = sections
@@ -1145,6 +1351,11 @@ mod tests {
             model_lang_mismatch: None,
             input_devices: Vec::new(),
             input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Piper,
+            tts_voice: "es_ES-davefx-medium".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
         };
         let sections = default_sections(&ctx);
         let sec = sections.iter().find(|s| s.id() == "prompt").unwrap();
@@ -1186,6 +1397,11 @@ mod tests {
             model_lang_mismatch: None,
             input_devices: Vec::new(),
             input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Piper,
+            tts_voice: "es_ES-davefx-medium".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
         };
         let sections = default_sections(&ctx);
         let hotkey = sections.iter().find(|s| s.id() == "hotkey").unwrap();
@@ -1271,14 +1487,19 @@ mod tests {
             model_lang_mismatch: None,
             input_devices: Vec::new(),
             input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Piper,
+            tts_voice: "es_ES-davefx-medium".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
         };
         ctx.model_lang_mismatch = Some("ggml-small.bin".into());
 
         let sections = default_sections(&ctx);
         assert_eq!(
             sections.len(),
-            10,
-            "8 base + 1 mismatch + 1 microphone = 10"
+            11,
+            "10 base + 1 mismatch = 11 (incluye nueva TtsSection)"
         );
         assert_eq!(sections[0].id(), "model_lang_mismatch");
 

@@ -64,8 +64,10 @@ pub trait Injector: Send + Sync + std::fmt::Debug + 'static {
 
 mod direct;
 mod injector;
+mod selection;
 mod smart;
 
 pub use direct::{DirectInjector, UiaDirectInjector};
 pub use injector::ArboardInjector;
+pub use selection::{Platform, SelectionReader};
 pub use smart::SmartInjector;

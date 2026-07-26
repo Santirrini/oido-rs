@@ -47,4 +47,16 @@ pub(crate) struct Cli {
     ///   --set-mic ""        # → automático
     #[arg(long)]
     pub set_mic: Option<String>,
+
+    /// Descarga assets TTS al directorio de modelos y sale. NO arranca
+    /// el binario (one-shot). Argumentos:
+    ///   oido --tts-download piper es_ES-davefx-medium
+    ///   oido --tts-download piper all
+    ///   oido --tts-download kokoro
+    ///
+    /// Para Kokoro se descargan 2 archivos (~326 MB modelo + ~25 MB
+    /// banco de voces). Para Piper se descargan 2 archivos por voz
+    /// (~63 MB .onnx + ~5 KB .onnx.json).
+    #[arg(long, value_name = "ENGINE", num_args = 1..=2)]
+    pub tts_download: Vec<String>,
 }

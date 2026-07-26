@@ -61,4 +61,21 @@ pub(crate) enum ControlMessage {
     /// icono de estado (set via `set_state`). El tooltip persistente
     /// es ortogonal y se setea con `set_tooltip`. Vacío = limpiar.
     SetUpdateTooltip(String),
+
+    // ============================================================
+    // TTS (lectura de selección de cursor)
+    // ============================================================
+    /// Toggle del sistema TTS (`Config::tts.enabled`).
+    ToggleTts,
+    /// Cambio de motor TTS (`Config::tts.engine`).
+    SetTtsEngine(oido_config::TtsEngineKind),
+    /// Cambio de voz TTS (`Config::tts.voice`).
+    SetTtsVoice(String),
+    /// Cambio de velocidad TTS (`Config::tts.speed_milli`).
+    SetTtsSpeed(u16),
+    /// El usuario disparó "leer selección ahora" (vía menú o hotkey).
+    /// El bin llama a `SelectionReader::read()` y envía el texto al
+    /// `TtsPipeline`. Sin payload porque el texto se obtiene en el
+    /// handler (no en el callback de hotkey, que debe ser rápido).
+    TtsReadSelection,
 }

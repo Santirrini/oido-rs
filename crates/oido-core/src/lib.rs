@@ -15,12 +15,14 @@ pub mod dedup;
 pub mod phrase_filter;
 pub mod pipeline;
 pub mod streaming_pipeline;
+pub mod tts_pipeline;
 
 // Re-exports para conveniencia del bin (consume estos tipos sin
 // importar cada crate granular individualmente).
 pub use chunked_pipeline::{ChunkedPipeline, ChunkedPipelineConfig};
-pub use oido_audio::{AudioFrame, AudioRx, AudioTx, CpalCapture, Resampler};
+pub use oido_audio::{AudioFrame, AudioRx, AudioTx, CpalCapture, CpalPlayback, PlaybackSink, Resampler};
 pub use oido_hotkey::{GatedHotkey, GatedReadyHandle, Hotkey, RdevHotkey};
 pub use oido_input::{ArboardInjector, Injector};
 pub use pipeline::{Pipeline, PipelineConfig, PipelineEvent, PipelineState, STT_WORKERS};
 pub use streaming_pipeline::{StreamingPipeline, StreamingPipelineConfig};
+pub use tts_pipeline::{TtsPipeline, TtsPipelineConfig};

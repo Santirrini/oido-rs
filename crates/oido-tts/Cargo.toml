@@ -1,0 +1,54 @@
+[package]
+name = "oido-tts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Síntesis TTS (Kokoro-82M + Piper) para lectura de selección. 100% Safe Rust; el FFI vive dentro de `ort`."
+
+[lints]
+workspace = true
+
+[features]
+# Forwarding de acceleration EP (DirectML/CUDA) al runtime ort.
+# `default` deja CPU; GPU acceleration es opt-in por build.
+directml = ["ort/directml"]
+cuda = ["ort/cuda"]
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+# Para parsear el `<voice>.onnx.json` en `piper/config.rs`. Workspace-wide.
+serde_json.workspace = true
+# Para el enum `TtsEngineKind` y sus setters/valores (mismo patrón que
+# `EffortPreset` en `oido-stt`: `oido-config` no depende de `oido-tts`,
+# solo de serde).
+oido-config = { path = "../oido-config", version = "0.1.0" }
+
+# Runtime ONNX compartido por Kokoro y Piper. `Session` es `Send + Sync`
+# (no necesitamos el patrón `oido-input/src/direct/windows.rs` de
+# thread dedicado); el `unsafe` FFI vive dentro de `ort`/`ort-sys`.
+ort.workspace = true
+ndarray.workspace = true
+
+# G2P
+misaki-rs = { workspace = true }
+piper-plus-g2p.workspace = true
+
+# Split de texto por oración para el chunker de `TtsPipeline`.
+unicode-segmentation.workspace = true
+
+# Lector NPZ (ZIP + NPY) para `voices-v1.0.bin` de Kokoro. El archivo
+# se distribuye como npz desde `thewh1teagle/kokoro-onnx` (un entry
+# `.npy` por voz, dtype `<f4`, shape `[max_token_len, 256]`). `zip`
+# 0.6 es pure-Rust y no arrastra FFI; `deflate` no es estrictamente
+# necesario (npz usa store) pero el coste es marginal y nos protege
+# de una variante futura comprimida.
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+# Para escribir `.onnx.json` sintéticos en los tests de `piper/config.rs`.
+tempfile.workspace = true

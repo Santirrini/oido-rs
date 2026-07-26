@@ -10,13 +10,18 @@ members = [
     "crates/oido-updater",
     "crates/oido-config",
     "crates/oido-models",
+    "crates/oido-tts",
     "crates/oido",
-]
+]  
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# MSRV 1.88: requerido por `ort 2.0.0-rc.12` (runtime ONNX usado por
+# el backend TTS en `oido-tts`). El repo se desarrolla con rustc 1.96
+# (`rust-toolchain.toml`); este `rust-version` declara el mínimo
+# aceptable para empaquetar.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Santirrini/oido-rs"
 authors = ["Jose Diaz"]
@@ -92,15 +97,35 @@ rubato = "0.15"
 # permanece 100% safe Rust. Solo se usa en target_os = "windows".
 uiautomation = "0.25"
 
+# --- TTS (Fase 2: lectura de selección) ---
+# Runtime ONNX usado por los backends Kokoro-82M (StyleTTS 2 + ISTFTNet)
+# y Piper (VITS). Pinear a `=2.0.0-rc.12` (la última release con MSRV
+# 1.88+. `Session` es `Send + Sync` y el `unsafe` FFI vive dentro de
+# `ort`/`ort-sys`, no en nuestro código: nuestro crate `oido-tts`
+# permanece 100% safe Rust (regla R2).
+ort = "=2.0.0-rc.12"
+# Tipos de array para tensores ONNX. Misma major que `ort 2.0.0-rc.12`.
+ndarray = "0.16"
+# G2P (grapheme-to-phoneme) para Kokoro. `default-features = false`
+# desactiva el binding a espeak-ng (GPL-3.0) — v1.0 de oido sólo
+# sintetiza Kokoro en inglés, evitando GPL en el binario.
+misaki-rs = { version = "0.3", default-features = false }
+# G2P puro-Rust para Piper. Soporta ES/EN/PT/FR/ZH/JA/KO/SV — MIT,
+# sin espeak-ng, sin GPL. Crate elegido porque el resto del stack
+# Piper TTS (espeak-rs) sería GPL vía el vendoring de espeak-ng.
+piper-plus-g2p = "0.4"
+# Split de texto por oración para el chunker del TtsPipeline. Mitiga
+# latencias y permite cancelación al re-seleccionar.
+unicode-segmentation = "1"
+
 # Stage lock: every member inherits MSRV pinned via workspace.package above.
 
 [workspace.lints.rust]
-# Regla R2: FFI aislado. Solo `oido-stt` y `oido-platform` (este último
-# para DPI + popup GDI) declaran `unsafe_code = "allow"` en su propio
-# `[lints]`. Todo el código `unsafe` en esos crates vive dentro de
-# archivos marcados explícitamente con `#![allow(unsafe_code)]` para
-# que sea trivial auditar FFI con un grep. CI revisa que ningún otro
-# archivo tenga `unsafe` accidental.
+# Regla R2: FFI aislado. Solo `oido-stt` y `oido-tray` declaran
+# `unsafe_code = "allow"` en su propio `[lints]`. Todo el código `unsafe`
+# en esos crates vive dentro de archivos marcados explícitamente con
+# `#![allow(unsafe_code)]` para que sea trivial auditar FFI con un
+# grep. CI revisa que ningún otro archivo tenga `unsafe` accidental.
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 

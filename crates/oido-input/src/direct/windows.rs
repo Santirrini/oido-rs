@@ -84,9 +84,19 @@ impl std::fmt::Debug for UiaDirectInjector {
     }
 }
 
-struct Job {
-    text: String,
-    reply: Sender<Result<(), InjectError>>,
+/// Trabajos que acepta el `oido-uia-worker`. Cada variante lleva su
+/// propio reply channel para devolver el resultado al caller.
+enum Job {
+    /// Escribir `text` en el elemento focused (path original).
+    Inject {
+        text: String,
+        reply: Sender<Result<(), InjectError>>,
+    },
+    /// Leer el texto actualmente seleccionado en el elemento focused
+    /// (vía `UIA Text::get_selection`).
+    ReadSelection {
+        reply: Sender<Result<String, InjectError>>,
+    },
 }
 
 impl UiaDirectInjector {
@@ -114,13 +124,26 @@ impl UiaDirectInjector {
 impl DirectInjector for UiaDirectInjector {
     fn inject_focused(&self, text: &str) -> Result<(), InjectError> {
         let (reply_tx, reply_rx) = bounded::<Result<(), InjectError>>(1);
-        let job = Job {
+        let job = Job::Inject {
             text: text.to_owned(),
             reply: reply_tx,
         };
 
         // Si el canal está saturado (8 jobs encolados), bloqueamos: preferimos
         // esperar antes que descartar transcripciones del usuario.
+        self.tx
+            .send(job)
+            .map_err(|_| InjectError::Unsupported("worker UIA muerto".into()))?;
+
+        reply_rx
+            .recv()
+            .map_err(|_| InjectError::Unsupported("worker UIA murió antes de responder".into()))?
+    }
+
+    fn read_selection(&self) -> Result<String, InjectError> {
+        let (reply_tx, reply_rx) = bounded::<Result<String, InjectError>>(1);
+        let job = Job::ReadSelection { reply: reply_tx };
+
         self.tx
             .send(job)
             .map_err(|_| InjectError::Unsupported("worker UIA muerto".into()))?;
@@ -164,12 +187,16 @@ fn run_worker(rx: Receiver<Job>) {
 
     loop {
         match rx.recv() {
-            Ok(job) => {
-                let result = inject_via_uia(&automation, &job.text);
+            Ok(Job::Inject { text, reply }) => {
+                let result = inject_via_uia(&automation, &text);
                 // Si el receptor ya cayó (caller soltó la tx), no hacer nada:
                 // el resultado se descarta y el siguiente job quizás también
                 // falle con `Unsupported`.
-                let _ = job.reply.send(result);
+                let _ = reply.send(result);
+            }
+            Ok(Job::ReadSelection { reply }) => {
+                let result = read_selection_via_uia(&automation);
+                let _ = reply.send(result);
             }
             Err(_) => {
                 tracing::info!("canal cerrado; saliendo del worker UIA");
@@ -181,9 +208,18 @@ fn run_worker(rx: Receiver<Job>) {
 
 fn drain_with_unavailable(rx: &Receiver<Job>) {
     while let Ok(job) = rx.recv() {
-        let _ = job
-            .reply
-            .send(Err(InjectError::Unsupported("UIA no inicializado".into())));
+        match job {
+            Job::Inject { reply, .. } => {
+                let _ = reply.send(Err(InjectError::Unsupported(
+                    "UIA no inicializado".into(),
+                )));
+            }
+            Job::ReadSelection { reply } => {
+                let _ = reply.send(Err(InjectError::Unsupported(
+                    "UIA no inicializado".into(),
+                )));
+            }
+        }
     }
 }
 
@@ -226,6 +262,77 @@ fn inject_via_uia(automation: &UIAutomation, text: &str) -> Result<(), InjectErr
     element
         .send_text(text, interval)
         .map_err(|e| InjectError::Unsupported(format!("send_text: {e}")))
+}
+
+/// Lee el texto actualmente seleccionado en el elemento focused.
+///
+/// Usa `IUIAutomationTextPattern::GetSelection` (vía el wrapper
+/// `patterns::UITextPattern`). Devuelve:
+/// - `Ok(text)` con el texto seleccionado (puede ser cadena vacía si
+///   sólo hay caret sin selección).
+/// - `Err(InjectError::Unsupported)` si el elemento no expone pattern
+///   de texto (botón, lista, imagen, etc.) o si hay timeout COM.
+/// - `Err(InjectError::NotEditable)` si el elemento no es editable
+///   (mismo filtro que en inyección).
+///
+/// Trade-off: NO distinguimos "selección vacía" (cadena vacía) de
+/// "selección ausente" — el caller (SelectionReader) decide.
+fn read_selection_via_uia(automation: &UIAutomation) -> Result<String, InjectError> {
+    use uiautomation::patterns::UITextPattern;
+
+    let element = automation
+        .get_focused_element()
+        .map_err(|e| InjectError::Unsupported(format!("get_focused_element: {e}")))?;
+
+    // Filtro "editable" — mismos criterios que en inyección.
+    match element.is_keyboard_focusable() {
+        Ok(true) => {}
+        Ok(false) => return Err(InjectError::NotEditable),
+        Err(e) => {
+            return Err(InjectError::Unsupported(format!(
+                "is_keyboard_focusable: {e}"
+            )))
+        }
+    }
+
+    // Downcast a UITextPattern. Si el control no soporta el TextPattern
+    // (botones, listas, imágenes, controles custom sin TextPattern),
+    // `get_pattern::<UITextPattern>()` falla — caemos a
+    // `Unsupported` para que `SelectionReader` pruebe el fallback de
+    // clipboard.
+    let text_pattern: UITextPattern = element
+        .get_pattern::<UITextPattern>()
+        .map_err(|e| InjectError::Unsupported(format!("TextPattern unavailable: {e}")))?;
+
+    // `max_length` de `get_text` viene del UIA; 4096 chars es un cap
+    // razonable para una selección de cursor — las selecciones típicas
+    // son < 1K.
+    const MAX_SEL_CHARS: i32 = 4096;
+    match text_pattern.get_selection() {
+        Ok(ranges) => {
+            // Concatenamos los rangos en orden. La mayoría de controles
+            // devuelven un solo rango; multi-range solo en code editors
+            // con multi-caret. Unimos con `\n` para preservar la pista.
+            let mut out = String::new();
+            for range in ranges {
+                match range.get_text(MAX_SEL_CHARS) {
+                    Ok(s) => {
+                        if !out.is_empty() && !s.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&s);
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, "UITextRange::get_text falló");
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Err(e) => Err(InjectError::Unsupported(format!(
+            "UITextPattern::get_selection: {e}"
+        ))),
+    }
 }
 
 // ---------------- env helpers ----------------

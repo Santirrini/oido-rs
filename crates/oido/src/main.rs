@@ -27,6 +27,7 @@ use oido_tray::mismatch_tooltip;
 #[cfg(target_os = "windows")]
 use oido_tray::show_model_prompt_windows;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
@@ -55,6 +56,25 @@ use runtime::ActivePipeline;
 /// debería sugerir al usuario (p.ej. `ggml-small.bin` para `ggml-small.
 /// en.bin`). Devuelve `None` si no hay mismatch o si no hay
 /// contraparte catalogada.
+
+/// TTS_RUNTIME — runtime global del TTS.
+///
+/// Se inicializa durante el primer arranque del STT (en `main`) y se
+/// consulta desde el handler `ControlMessage::TtsReadSelection` del
+/// control loop. Si es `None`, el handler loguea un warn y no hace
+/// nada (e.g. porque `tts.enabled` está en false).
+///
+/// Usar `Mutex<Option<...>>` evita reinventar el patrón `OnceCell` para
+/// algo que tiene un solo inicializador; el lock es de nanosegundos (un
+/// Option check + move).
+use std::sync::OnceLock;
+static TTS_RUNTIME: OnceLock<parking_lot::Mutex<Option<TtsRuntime>>> =
+    OnceLock::new();
+
+fn tts_runtime() -> &'static parking_lot::Mutex<Option<TtsRuntime>> {
+    TTS_RUNTIME.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
 fn detect_model_lang_mismatch(snap: &Config) -> Option<String> {
     if !oido_models::is_english_only_model(&snap.model) {
         return None;
@@ -98,7 +118,80 @@ fn build_ctx(snap: &Config) -> BuildContext {
         model_lang_mismatch: detect_model_lang_mismatch(snap),
         input_devices,
         input_device: snap.input_device.clone(),
+        tts_enabled: snap.tts.enabled,
+        tts_engine: snap.tts.engine,
+        tts_voice: snap.tts.voice.clone(),
+        tts_speed_milli: snap.tts.speed_milli,
     }
+}
+
+/// Estado runtime del TTS — vive en un Arc<Mutex<Option<...>>> global
+/// para que el handler `TtsReadSelection` (en el control loop) pueda
+/// acceder al `TtsPipeline` sin depender del ciclo de vida del bloque
+/// donde se construyó.
+#[derive(Clone)]
+struct TtsRuntime {
+    text_sink: crossbeam_channel::Sender<String>,
+    cancel: Arc<AtomicBool>,
+    selection_reader: Arc<parking_lot::Mutex<oido_input::SelectionReader>>,
+    /// Handle al sink de audio para poder cancelar audio pendiente al
+    /// inicio de una nueva lectura. Sin esto, el stream siempre-activo
+    /// de cpal reproduciría las muestras PCM del chunk anterior detrás
+    /// del nuevo, produciendo "lo que escucho no es lo que seleccioné".
+    playback: Arc<dyn oido_audio::PlaybackSink>,
+}
+
+impl std::fmt::Debug for TtsRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TtsRuntime")
+            .field("cancel", &self.cancel)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One-shot CLI para descargar assets TTS al `models_dir`. Argumentos:
+///   `["piper", "<voice_id>"|"all"]` | `["kokoro"]`.
+///
+/// NO bloquea el hotkey del dictador — sale apenas termina la descarga
+/// (one-shot).
+fn run_tts_download(args: &[String]) -> Result<()> {
+    let dir = resolve_models_dir();
+    let _ = std::fs::create_dir_all(&dir);
+
+    match args[0].as_str() {
+        "piper" => {
+            // Voz explícita o "all" → todas las del catálogo estático.
+            let target = args.get(1).map(String::as_str);
+            let voices: Vec<&str> = match target {
+                None | Some("all") => oido_tts::PIPER_DEFAULT_VOICES.to_vec(),
+                Some(v) => vec![v],
+            };
+            for voice in voices {
+                if oido_models::tts_models::is_piper_voice_installed(&dir, voice) {
+                    println!("voz Piper {voice} ya instalada; skip");
+                    continue;
+                }
+                println!("descargando voz Piper: {voice}");
+                oido_models::tts_models::download_piper_voice(&dir, voice)
+                    .with_context(|| format!("descargando Piper {voice}"))?;
+            }
+        }
+        "kokoro" => {
+            if oido_models::tts_models::is_kokoro_installed(&dir) {
+                println!("Kokoro ya instalado; skip");
+            } else {
+                println!("descargando Kokoro + voices-v1.0.bin (~351 MB total)");
+                oido_models::tts_models::download_kokoro_voice(&dir)
+                    .context("descargando Kokoro")?;
+            }
+        }
+        other => anyhow::bail!(
+            "engine TTS desconocido: '{other}'. Use 'piper' o 'kokoro'."
+        ),
+    }
+
+    println!("Hecho. Models dir: {}", dir.display());
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -145,6 +238,11 @@ fn main() -> Result<()> {
     if cli.config_path {
         println!("{}", oido_config::config_file().display());
         return Ok(());
+    }
+
+    // One-shot: --tts-download piper [<voice>|all] | --tts-download kokoro.
+    if !cli.tts_download.is_empty() {
+        return run_tts_download(&cli.tts_download);
     }
 
     // Manejar flag `--check-update`: buscar actualizaciones y salir
@@ -629,6 +727,38 @@ fn main() -> Result<()> {
                         MenuAction::ProbeMicrophones => {
                             let _ = control_tx_for_menu.send(ControlMessage::ProbeMicrophones);
                         }
+                        // ----- TTS (lectura de selección) -----
+                        MenuAction::ToggleTts => {
+                            let _ = control_tx_for_menu.send(ControlMessage::ToggleTts);
+                        }
+                        MenuAction::SetTtsEngine(id) => {
+                            let kind = match id.as_str() {
+                                "kokoro" => oido_config::TtsEngineKind::Kokoro,
+                                "piper" => oido_config::TtsEngineKind::Piper,
+                                other => {
+                                    tracing::warn!(id = %other, "TtsEngineKind desconocido");
+                                    oido_config::TtsConfig::default().engine
+                                }
+                            };
+                            let _ = control_tx_for_menu.send(
+                                ControlMessage::SetTtsEngine(kind),
+                            );
+                        }
+                        MenuAction::SetTtsVoice(voice) => {
+                            let _ = control_tx_for_menu.send(
+                                ControlMessage::SetTtsVoice(voice),
+                            );
+                        }
+                        MenuAction::SetTtsSpeed(milli) => {
+                            let _ = control_tx_for_menu.send(
+                                ControlMessage::SetTtsSpeed(milli),
+                            );
+                        }
+                        MenuAction::TtsReadNow => {
+                            let _ = control_tx_for_menu.send(
+                                ControlMessage::TtsReadSelection,
+                            );
+                        }
                     }
                 }
             })?;
@@ -653,7 +783,7 @@ fn main() -> Result<()> {
                                shared_opt: &Option<Arc<SharedTranscriber>>,
                                is_downloading: bool,
                                input_device: Option<&str>|
-          -> Result<(ActivePipeline, JoinHandle<()>)> {
+          -> Result<(ActivePipeline, JoinHandle<()>, Option<Arc<dyn DirectInjector>>)> {
         let capture =
             Box::new(CpalCapture::with_device(input_device).context("init captura audio")?);
         // `GatedHotkey` envuelve el `RdevHotkey` y suprime los callbacks
@@ -683,6 +813,14 @@ fn main() -> Result<()> {
                 None
             }
         };
+        // Clonamos el `Arc<dyn DirectInjector>` antes de mover el
+        // `Option` a `SmartInjector`. El clon se usa más abajo en el
+        // `SelectionReader` para que el path UIA (lectura de selección
+        // sin necesidad de foco) esté disponible también para TTS.
+        // Sin esto, el reader cae SIEMPRE al fallback clipboard+Ctrl+C,
+        // que pierde el foco al abrir el menú tray y falla.
+        let direct_for_reader: Option<Arc<dyn DirectInjector>> =
+            direct.as_ref().map(Arc::clone);
         let injector: Arc<dyn oido_input::Injector> =
             Arc::new(SmartInjector::new(direct, clipboard));
 
@@ -916,7 +1054,7 @@ fn main() -> Result<()> {
                 let _ = control_tx_for_lazy.send(ControlMessage::SetTrayState(TrayState::Idle));
             })?;
 
-        Ok((active_pipe, obs))
+        Ok((active_pipe, obs, direct_for_reader))
     };
 
     // `is_downloading_at_startup` se asigna a `true` únicamente en la
@@ -977,6 +1115,7 @@ fn main() -> Result<()> {
     }
 
     // Arranque inicial
+    let mut direct_for_tts: Option<Arc<dyn DirectInjector>> = None;
     match start_pipeline(
         &current_binding,
         stt_mode,
@@ -986,9 +1125,10 @@ fn main() -> Result<()> {
         is_downloading_at_startup,
         snap.input_device.as_deref(),
     ) {
-        Ok((pipe, obs)) => {
+        Ok((pipe, obs, direct)) => {
             pipeline_opt = Some(pipe);
             observer_handle = Some(obs);
+            direct_for_tts = direct;
             tracing::info!(
                 hotkey = %current_binding,
                 "hold {current_binding}, dicta, suelta. Ctrl+C para salir."
@@ -1009,6 +1149,221 @@ fn main() -> Result<()> {
             tracing::error!(?e, "no se pudo arrancar el pipeline inicial");
         }
     }
+
+    // ============================================================
+    // F6.5 (final) — Cableado del sistema TTS end-to-end
+    // ============================================================
+    //
+    // Problema que arreglamos: cuando el usuario hace click en el menú
+    // "Leer selección ahora", el handler `ControlMessage::TtsReadSelection`
+    // debe poder enviar el texto leído al `TtsPipeline`. Para que el
+    // `TtsPipeline` sea accesible desde el control loop (que está
+    // declarado más abajo en esta misma `fn main`), lo guardamos en
+    // un `TTS_RUNTIME: Arc<Mutex<Option<TtsRuntime>>>` global del módulo.
+    //
+    // El cableado:
+    //  1. `CpalPlayback` (thread `oido-playback-worker`, ya existe en
+    //     `oido-audio`) o `CpalPlaybackStub` como fallback inerte.
+    //  2. `PiperEngine` lazy-loaded desde `oido-tts-lazy-loader`
+    //     (NO bloquea el startup).
+    //  3. `TtsPipeline` arranca el worker `oido-tts-worker` (consume
+    //     `text_sink`).
+    //  4. `SelectionReader` con UIA/clipboard fallback.
+    //
+    // Lo envolvemos en un closure `rebuild_tts_runtime` para poder
+    // llamarlo también desde el handler `ControlMessage::SetTtsEngine`
+    // cuando el usuario cambia de engine en el menú tray. Sin esto,
+    // el `TtsRuntime` global seguiría usando el engine viejo aunque
+    // la config dijera lo contrario (bug: "cambiar a Kokoro no
+    // funcionaba" — la config se actualizaba pero el pipeline seguía
+    // usando Piper).
+    let rebuild_tts_runtime = || {
+        let snap_for_tts = cfg.snapshot();
+        if !snap_for_tts.tts.enabled {
+            tracing::info!("TTS deshabilitado por config; saltando cableado TTS");
+            return;
+        }
+        let voice_id = snap_for_tts.tts.voice.clone();
+        let engine_kind = snap_for_tts.tts.engine;
+        tracing::info!(
+            voice = %voice_id,
+            engine = ?engine_kind,
+            "cableando sistema TTS (lectura de selección)"
+        );
+
+        // 1) Playback sink
+        let playback: Arc<dyn oido_audio::PlaybackSink> =
+            match oido_audio::CpalPlayback::new() {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        "no se pudo inicializar CpalPlayback; \
+                         usando stub (no se oirá audio)"
+                    );
+                    Arc::new(oido_audio::CpalPlaybackStub)
+                }
+            };
+
+        // 2) Engine concreto — ambos cableados (Piper ES, Kokoro EN).
+        //    Kokoro requiere load() + load_voices() en el lazy-loader
+        //    (ver más abajo); Piper sólo requiere load().
+        let engine: Box<dyn oido_tts::Engine> = match engine_kind {
+            oido_config::TtsEngineKind::Piper => {
+                Box::new(oido_tts::PiperEngine::new(voice_id.clone()))
+            }
+            oido_config::TtsEngineKind::Kokoro => {
+                Box::new(oido_tts::KokoroEngine::new(voice_id.clone()))
+            }
+        };
+        let shared_engine = oido_tts::SharedEngine::new(engine);
+        let shared_arc = Arc::new(shared_engine);
+
+        // 3) Construir y arrancar el TtsPipeline
+        let engine_for_pipeline: Arc<dyn oido_tts::Engine> =
+            Arc::clone(&shared_arc) as Arc<dyn oido_tts::Engine>;
+        // Clonamos el Arc<PlaybackSink> antes de moverlo al pipeline:
+        // el handler `TtsReadSelection` necesita una referencia para
+        // llamar `stop()` y vaciar el buffer PCM al iniciar lectura.
+        let playback_for_runtime = Arc::clone(&playback);
+        let mut tts_pipe = oido_core::TtsPipeline::new(
+            oido_core::TtsPipelineConfig {
+                engine: engine_for_pipeline,
+                playback,
+            },
+        );
+        if let Err(e) = tts_pipe.start() {
+            tracing::error!(?e, "TtsPipeline::start falló");
+            return;
+        }
+
+        // 4) SelectionReader — UIA primero (si `direct_for_tts`
+        //    está disponible), fallback clipboard+Ctrl+C si no.
+        //    UIA puede leer selección sin foco: crítico porque el
+        //    click en el menú tray mueve el foco al menú y el
+        //    fallback clipboard capturaría basura.
+        let selection_reader = Arc::new(parking_lot::Mutex::new(
+            oido_input::SelectionReader::with_current_platform(
+                direct_for_tts.clone(),
+            ),
+        ));
+
+        // 5) Guardar en el global para que el handler del control
+        //    loop (`ControlMessage::TtsReadSelection`) pueda
+        //    acceder text_sink + cancel + selection_reader +
+        //    playback (para cancelar audio pendiente).
+        let runtime = TtsRuntime {
+            text_sink: tts_pipe.text_sink(),
+            cancel: tts_pipe.cancel_handle(),
+            selection_reader,
+            playback: playback_for_runtime,
+        };
+        tts_runtime().lock().replace(runtime);
+
+        tracing::info!(
+            "TtsRuntime listo (text_sink + cancel + SelectionReader \
+             registrados para control loop)"
+        );
+
+        // 6) Lazy-loader del modelo (espejo del STT). El
+        //    TtsPipeline ya está arrancado y produciría errores
+        //    hasta que el modelo cargue — eso es OK porque la
+        //    primera síntesis simplemente devuelve
+        //    `TtsError::Backend("modelo no cargado")` y el handler
+        //    lo loguea sin tirar el programa.
+        let models_dir_for_tts_lazy = models_dir.clone();
+        let voice_for_lazy = voice_id.clone();
+        let engine_kind_for_lazy = engine_kind;
+        std::thread::Builder::new()
+            .name("oido-tts-lazy-loader".into())
+            .spawn(move || {
+                // Bifurcación por engine_kind: Piper y Kokoro esperan
+                // paths distintos, pero ambos usan `load()` del trait.
+                // Kokoro auto-carga `voices-v1.0.bin` desde el mismo
+                // directorio del `.onnx` dentro de su `load()`, así
+                // que el bin no necesita type-erased downcast (que
+                // habría requerido `unsafe` fuera de la whitelist R2).
+                let model_path = match engine_kind_for_lazy {
+                    oido_config::TtsEngineKind::Piper => {
+                        models_dir_for_tts_lazy
+                            .join(format!("{voice_for_lazy}.onnx"))
+                    }
+                    oido_config::TtsEngineKind::Kokoro => {
+                        // Path fijo del modelo Kokoro (de tts_models.rs).
+                        models_dir_for_tts_lazy.join("kokoro-82m-v1.0.onnx")
+                    }
+                };
+                if !model_path.exists() {
+                    let cmd = match engine_kind_for_lazy {
+                        oido_config::TtsEngineKind::Piper => {
+                            format!("oido --tts-download piper {voice_for_lazy}")
+                        }
+                        oido_config::TtsEngineKind::Kokoro => {
+                            "oido --tts-download kokoro".to_string()
+                        }
+                    };
+                    tracing::error!(
+                        engine = ?engine_kind_for_lazy,
+                        voice = %voice_for_lazy,
+                        path = ?model_path,
+                        "TTS: modelo no encontrado. Descárgalo con: {cmd}"
+                    );
+                    return;
+                }
+                // Kokoro: verificar que también esté el voices.bin
+                // antes de invocar `load` (el `load` mismo lo
+                // auto-carga si lo encuentra, pero un pre-chequeo
+                // explícito produce un mensaje de error más claro).
+                if engine_kind_for_lazy == oido_config::TtsEngineKind::Kokoro {
+                    let voices_path = models_dir_for_tts_lazy
+                        .join("voices-v1.0.bin");
+                    if !voices_path.exists() {
+                        tracing::error!(
+                            path = ?voices_path,
+                            "TTS: voices-v1.0.bin no encontrado. \
+                             Descárgalo con: oido --tts-download kokoro"
+                        );
+                        return;
+                    }
+                }
+                {
+                    let handle = shared_arc.handle();
+                    let mut guard = handle.lock();
+                    if let Err(e) = guard.load(&model_path) {
+                        tracing::error!(
+                            ?e,
+                            engine = ?engine_kind_for_lazy,
+                            path = ?model_path,
+                            "TTS lazy load: modelo no cargó"
+                        );
+                        return;
+                    }
+                    tracing::info!(
+                        engine = ?engine_kind_for_lazy,
+                        voice = %voice_for_lazy,
+                        "TTS: modelo cargado (lazy)"
+                    );
+                }
+                // Warm-up común: corre `synthesize("hello")` una vez
+                // para que la primera inferencia real no pague cold-path.
+                {
+                    let handle = shared_arc.handle();
+                    let guard = handle.lock();
+                    if let Err(e) = guard.warm_up() {
+                        tracing::warn!(
+                            ?e,
+                            "TTS warm-up falló; la primera \
+                             síntesis será más lenta"
+                        );
+                    } else {
+                        tracing::info!("TTS warm-up completado");
+                    }
+                }
+            })
+            .ok();
+    };
+    // Invocación inicial (arranque del bin).
+    rebuild_tts_runtime();
 
     // Resumen final del startup: cuanto tardó desde `fn main()` hasta
     // pipeline armado + tray visible. Métrica objetivo para Fase 2.
@@ -1161,7 +1516,7 @@ fn main() -> Result<()> {
                         false,
                         snap.input_device.as_deref(),
                     ) {
-                        Ok((pipe, obs)) => {
+                        Ok((pipe, obs, _direct)) => {
                             pipeline_opt = Some(pipe);
                             observer_handle = Some(obs);
                             tracing::info!("Pipeline reiniciado con hotkey {}", current_binding);
@@ -1292,7 +1647,7 @@ fn main() -> Result<()> {
                             false,
                             snap.input_device.as_deref(),
                         ) {
-                            Ok((pipe, obs)) => {
+                            Ok((pipe, obs, _direct)) => {
                                 pipeline_opt = Some(pipe);
                                 observer_handle = Some(obs);
                                 tracing::info!("Pipeline iniciado en modo {:?}", mode);
@@ -1363,7 +1718,7 @@ fn main() -> Result<()> {
                             false,
                             snap_for_restart.input_device.as_deref(),
                         ) {
-                            Ok((pipe, obs)) => {
+                            Ok((pipe, obs, _direct)) => {
                                 pipeline_opt = Some(pipe);
                                 observer_handle = Some(obs);
                                 if let Some(ref mut t) = tray {
@@ -1557,6 +1912,190 @@ fn main() -> Result<()> {
                             tracing::debug!(?e, "set_tooltip");
                         }
                     }
+                }
+                // ============================================================
+                // TTS (lectura de selección de cursor) — v2 final
+                // ============================================================
+                ControlMessage::ToggleTts => {
+                    let mut snap = cfg.snapshot();
+                    snap.tts.enabled = !snap.tts.enabled;
+                    let new_enabled = snap.tts.enabled;
+                    cfg.replace(snap.clone());
+                    if let Err(e) = cfg.save() {
+                        tracing::error!(?e, "no se pudo persistir toggle TTS");
+                    }
+                    tracing::info!(
+                        enabled = new_enabled,
+                        "TTS {} (persistente)",
+                        if new_enabled { "habilitado" } else { "deshabilitado" }
+                    );
+                    if let Some(ref mut t) = tray {
+                        let sections = default_sections(&build_ctx(&snap));
+                        if let Err(e) = t.rebuild_menu(sections) {
+                            tracing::error!(
+                                ?e,
+                                "no se pudo reconstruir menú tras toggle TTS"
+                            );
+                        }
+                    }
+                }
+                ControlMessage::SetTtsEngine(kind) => {
+                    let mut snap = cfg.snapshot();
+                    if snap.tts.engine != kind {
+                        snap.tts.engine = kind;
+                        cfg.replace(snap.clone());
+                        if let Err(e) = cfg.save() {
+                            tracing::error!(?e, "no se pudo persistir TtsEngine");
+                        }
+                        tracing::info!(engine = ?kind, "engine TTS cambiado");
+                        // Reconstruir el pipeline TTS con el engine nuevo.
+                        // Sin esto, el `TtsRuntime` global seguía usando el
+                        // engine anterior aunque la config estuviera
+                        // actualizada — bug "cambiar a Kokoro no funcionaba".
+                        rebuild_tts_runtime();
+                        if let Some(ref mut t) = tray {
+                            let sections = default_sections(&build_ctx(&snap));
+                            if let Err(e) = t.rebuild_menu(sections) {
+                                tracing::error!(
+                                    ?e,
+                                    "rebuild_menu tras SetTtsEngine"
+                                );
+                            }
+                        }
+                    }
+                }
+                ControlMessage::SetTtsVoice(voice) => {
+                    let mut snap = cfg.snapshot();
+                    if snap.tts.voice != voice {
+                        snap.tts.voice = voice.clone();
+                        cfg.replace(snap.clone());
+                        if let Err(e) = cfg.save() {
+                            tracing::error!(?e, "no se pudo persistir TtsVoice");
+                        }
+                        tracing::info!(voice = %voice, "voz TTS cambiada");
+                        // Reconstruir pipeline: la voz nueva requiere
+                        // cargar su propio modelo `.onnx` (cada voz Piper
+                        // es un archivo distinto).
+                        rebuild_tts_runtime();
+                    }
+                }
+                ControlMessage::SetTtsSpeed(milli) => {
+                    let mut snap = cfg.snapshot();
+                    let clamped = milli.clamp(500, 2000);
+                    if snap.tts.speed_milli != clamped {
+                        snap.tts.speed_milli = clamped;
+                        cfg.replace(snap.clone());
+                        if let Err(e) = cfg.save() {
+                            tracing::error!(?e, "no se pudo persistir TtsSpeed");
+                        }
+                        tracing::info!(speed_milli = clamped, "velocidad TTS cambiada");
+                    }
+                }
+                ControlMessage::TtsReadSelection => {
+                    // === HANDLE REAL de "Leer selección ahora" ===
+                    //
+                    // Flujo:
+                    //   1. Tomar el TTS_RUNTIME global.
+                    //   2. Si es None → TTS deshabilitado o no se pudo
+                    //      inicializar → loguear y no hacer nada.
+                    //   3. Cancelar lo pendiente (cancel.store(true)).
+                    //   4. Spawn thread `oido-tts-read` para:
+                    //      a. SelectionReader::read() (UIA → clipboard+Ctrl+C).
+                    //      b. text_sink.send(text).
+                    //
+                    // El texto se envía por el canal al worker
+                    // `oido-tts-worker` que ya está corriendo, así que
+                    // NO bloqueamos el control loop.
+                    let Some(runtime) = tts_runtime().lock().as_ref().cloned() else {
+                        tracing::warn!(
+                            "TtsReadSelection: TTS_RUNTIME no inicializado \
+                             (TTS deshabilitado o arranque fallido). \
+                             Verifica Config.tts.enabled=true."
+                        );
+                        continue;
+                    };
+                    // 3. cancel + flush del playback + 4. spawn.
+                    // El `cancel.store(true)` detiene el worker TTS entre
+                    // chunks; el `playback.stop()` vacía el buffer PCM
+                    // del callback de cpal para que el audio del chunk
+                    // anterior NO se mezcle con el nuevo.
+                    runtime.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Err(e) = runtime.playback.stop() {
+                        tracing::warn!(?e, "TtsReadSelection: playback.stop() falló");
+                    }
+                    let text_sink = runtime.text_sink.clone();
+                    let cancel = Arc::clone(&runtime.cancel);
+                    let selection_reader = Arc::clone(&runtime.selection_reader);
+                    let cfg_for_read = Arc::clone(&cfg);
+                    let _ = std::thread::Builder::new()
+                        .name("oido-tts-read".into())
+                        .spawn(move || {
+                            // Chequea config una vez más (pudo cambiar
+                            // mientras el thread arrancaba — race
+                            // benigno: si alguien lo apaga después, sólo
+                            // perdemos una síntesis, no rompemos nada).
+                            if !cfg_for_read.snapshot().tts.enabled {
+                                return;
+                            }
+                            // a) Leer selección.
+                            let text = {
+                                let mut r = selection_reader.lock();
+                                match r.read() {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            ?e,
+                                            "TtsReadSelection: lectura de selección falló"
+                                        );
+                                        return;
+                                    }
+                                }
+                            };
+                            if text.trim().is_empty() {
+                                tracing::info!(
+                                    "TtsReadSelection: selección vacía"
+                                );
+                                return;
+                            }
+                            // b) Truncar selección excesivamente larga.
+                            //    Limitamos a MAX_SELECTION_CHARS para evitar
+                            //    síntesis absurdamente largas (e.g. el
+                            //    usuario pegó el log completo por error y
+                            //    seleccionó 12k chars → ~10 min de audio
+                            //    sin posibilidad de cancelar todo).
+                            //    El truncado es por chars (UTF-8), no por
+                            //    bytes, para no partir caracteres multi-byte.
+                            const MAX_SELECTION_CHARS: usize = 2000;
+                            let text_owned: String = if text.chars().count() > MAX_SELECTION_CHARS {
+                                let truncated: String = text.chars().take(MAX_SELECTION_CHARS).collect();
+                                tracing::warn!(
+                                    original_chars = text.chars().count(),
+                                    max = MAX_SELECTION_CHARS,
+                                    "TtsReadSelection: selección truncada \
+                                     (demasiado larga). Solo se leerán los \
+                                     primeros {MAX_SELECTION_CHARS} chars."
+                                );
+                                truncated
+                            } else {
+                                text
+                            };
+                            // c) Enviar al worker TTS.
+                            if let Err(e) = text_sink.send(text_owned.clone()) {
+                                tracing::warn!(
+                                    ?e,
+                                    chars = text_owned.chars().count(),
+                                    "TtsReadSelection: text_sink.send falló"
+                                );
+                                return;
+                            }
+                            tracing::info!(
+                                chars = text_owned.chars().count(),
+                                preview = &text_owned.chars().take(40).collect::<String>(),
+                                "TTS: texto enviado al pipeline"
+                            );
+                            // Reset cancel para el próximo chunk.
+                            cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+                        });
                 }
                 #[cfg(feature = "updater")]
                 ControlMessage::UpdateEvent(event) => {

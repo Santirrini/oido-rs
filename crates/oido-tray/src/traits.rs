@@ -87,6 +87,29 @@ pub enum MenuAction {
     /// dispositivo con mejor señal, aplica `SetInputDevice` con el
     /// nombre ganador.
     ProbeMicrophones,
+
+    // ============================================================
+    // TTS (lectura de selección de cursor)
+    // ============================================================
+    /// Click sobre el toggle "TTS habilitado". Sólo se renderiza si
+    /// la feature está activa en `TtsConfig::enabled`.
+    ToggleTts,
+    /// Click sobre el submenú "Motor" (Kokoro/Piper). El String es el
+    /// ID canónico (`"kokoro"` o `"piper"`) parseable a
+    /// `TtsEngineKind` en el bin.
+    SetTtsEngine(String),
+    /// Click sobre un item del submenú "Voz". El String es el ID
+    /// canónico de `VoiceDescriptor.id` (`"af_heart"`,
+    /// `"es_ES-davefx-medium"`, etc.). El bin valida que el engine
+    /// activo lo ofrezca y persiste.
+    SetTtsVoice(String),
+    /// Click sobre un item del submenú "Velocidad". El valor es el
+    /// multiplicador en millis (500, 750, 1000, 1250, 1500, 2000).
+    SetTtsSpeed(u16),
+    /// Click sobre un item del submenú "Leer selección ahora". El bin
+    /// dispara `selection_reader.read()` y manda el texto al pipeline
+    /// TTS actual.
+    TtsReadNow,
 }
 
 /// Trait `Tray` (antes en `oido-platform::traits`).

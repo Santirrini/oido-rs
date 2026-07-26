@@ -32,4 +32,10 @@ impl DirectInjector for UiaDirectInjector {
             "backend de accesibilidad no implementado en este SO".into(),
         ))
     }
+
+    fn read_selection(&self) -> Result<String, InjectError> {
+        Err(InjectError::Unsupported(
+            "read_selection no implementado en este SO".into(),
+        ))
+    }
 }

@@ -99,7 +99,106 @@ fn default_system_prompt() -> String {
     String::new()
 }
 
-/// Preset de "esfuerzo de decodificación" del motor whisper.cpp.
+/// Motor TTS preferido por el usuario. Ambos se distribuyen como parte
+/// de `oido-tts`.
+///
+/// - `Kokoro`: 82 M params (Apache-2.0). CPU friendly. EN/UK/JA/ZH/ES/FR/HI/IT/PT.
+//// Sólo sintetiza de forma robusta en **inglés** en la v1.0 del TTS
+///   (porque `misaki-rs` no tiene G2P de español sin espeak-ng = GPL).
+//// El bin enrutará texto español automáticamente a Piper cuando el
+///   engine seleccionado sea `Kokoro`.
+/// - `Piper`: VITS neural. Soporta ES/EN/PT/FR/ZH/JA/KO/SV vía
+///   `piper-plus-g2p` (MIT, sin GPL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsEngineKind {
+    Kokoro,
+    Piper,
+}
+
+fn default_tts_engine() -> TtsEngineKind {
+    // Default razonable: Piper arranca con voz española, Kokoro requiere
+    // descargar el modelo grande (326 MB) y al inglés.
+    TtsEngineKind::Piper
+}
+
+/// Configuración del sistema TTS. Sub-struct bajo `Config::tts` con
+/// `#[serde(default)]` a nivel de campo para retro-compat total con
+/// configs existentes.
+///
+/// Diseño paralelo a `UpdateConfig`: vive como sub-struct dedicado
+/// porque el conjunto de campos crecerá (voces, intensidad, idioma,
+/// etc.) y mantenerlo en línea inflaría `Config`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TtsConfig {
+    /// Habilita el sistema TTS (lectura de selección). `false` =
+    /// deshabilitado por completo; el hotkey de "leer selección"
+    /// no hace nada y el submenú del tray queda oculto.
+    #[serde(default = "default_tts_enabled")]
+    pub enabled: bool,
+    /// Motor seleccionado. Si el texto de la selección cae en un idioma
+    /// que este engine no soporta fluidamente, el bin lo enrruta a
+    /// `Piper` (el único que tiene G2P ES limpio).
+    #[serde(default = "default_tts_engine")]
+    pub engine: TtsEngineKind,
+    /// Voz activa. ID canónico del `VoiceDescriptor.id` del engine
+    /// correspondiente (`af_heart`, `es_ES-davefx-medium`, etc.).
+    #[serde(default = "default_tts_voice")]
+    pub voice: String,
+    /// Multiplicador de velocidad. 1.0 = normal. Rango recomendado
+    /// 0.5–2.0 (Kokoro soporta 0.5–2.0; Piper no tiene un parámetro
+    /// equivalente directo, se controla mediante `length_scale` del
+    /// .onnx.json).
+    #[serde(default = "default_tts_speed")]
+    pub speed_milli: u16,
+    /// Si `true`, el atajo global de TTS lee la selección actual. Si
+    /// `false`, sólo se sintetiza on-demand desde el menú del tray.
+    #[serde(default = "default_tts_enabled")]
+    pub on_hotkey: bool,
+    /// Atajo global para activar la lectura TTS de selección.
+    /// Default `"Ctrl+Shift+S"`.
+    #[serde(default = "default_tts_hotkey")]
+    pub hotkey: String,
+    /// Si `true`, lee también cualquier nueva selección (sin requerir
+    /// hotkey). En v1.0 queda **desactivado por defecto** porque la
+    /// interferencia con UIA + captura WASAPI ya está diagnosticada
+    /// como delicada.
+    #[serde(default)]
+    pub on_selection: bool,
+}
+
+fn default_tts_enabled() -> bool {
+    true
+}
+
+fn default_tts_voice() -> String {
+    // Voz multilingüe razonablemente buena y de tamaño moderado (≈63 MB).
+    "es_ES-davefx-medium".into()
+}
+
+fn default_tts_speed() -> u16 {
+    1000 // 1.0x, almacenado como milli para evitar floats en serialización.
+}
+
+fn default_tts_hotkey() -> String {
+    "Ctrl+Shift+S".into()
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tts_enabled(),
+            engine: default_tts_engine(),
+            voice: default_tts_voice(),
+            speed_milli: default_tts_speed(),
+            on_hotkey: default_tts_enabled(),
+            hotkey: default_tts_hotkey(),
+            on_selection: false,
+        }
+    }
+}
+
+
 ///
 /// whisper.cpp no expone un único parámetro `effort` como la OpenAI API.
 /// El esfuerzo real se modela combinando: estrategia de muestreo
@@ -259,6 +358,10 @@ pub struct Config {
     /// Configuración del auto-updater. Ver [`UpdateConfig`].
     #[serde(default)]
     pub update: UpdateConfig,
+    /// Configuración del sistema TTS (lectura de selección). Ver
+    /// [`TtsConfig`].
+    #[serde(default)]
+    pub tts: TtsConfig,
 }
 
 /// `default_use_gpu` se evalúa en runtime: detecta features compiladas.
@@ -270,25 +373,26 @@ fn default_n_threads() -> Option<u16> {
     None
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            hotkey: "F8".into(),
-            model: "ggml-base.bin".into(),
-            language_ui: "es".into(),
-            use_gpu: default_use_gpu(),
-            n_threads: None,
-            theme: default_theme(),
-            stt_mode: default_stt_mode(),
-            ui_language: default_ui_language(),
-            prompt_preset: default_prompt_preset(),
-            system_prompt: default_system_prompt(),
-            effort: default_effort_preset(),
-            input_device: default_input_device(),
-            update: UpdateConfig::default(),
+        impl Default for Config {
+            fn default() -> Self {
+                Self {
+                    hotkey: "F8".into(),
+                    model: "ggml-base.bin".into(),
+                    language_ui: "es".into(),
+                    use_gpu: default_use_gpu(),
+                    n_threads: None,
+                    theme: default_theme(),
+                    stt_mode: default_stt_mode(),
+                    ui_language: default_ui_language(),
+                    prompt_preset: default_prompt_preset(),
+                    system_prompt: default_system_prompt(),
+                    effort: default_effort_preset(),
+                    input_device: default_input_device(),
+                    update: UpdateConfig::default(),
+                    tts: TtsConfig::default(),
+                }
+            }
         }
-    }
-}
 
 /// Path canónico al directorio de configuración del usuario para Oido.
 pub fn config_dir() -> PathBuf {
@@ -463,30 +567,46 @@ mod tests {
                         system_prompt,
                         effort,
                         input_device,
-                    )| Self {
-                        hotkey,
-                        model,
-                        language_ui,
-                        use_gpu,
-                        n_threads,
-                        theme,
-                        stt_mode,
-                        ui_language,
-                        prompt_preset,
-                        system_prompt,
-                        effort,
-                        input_device,
-                        // UpdateConfig se genera fijo con defaults
-                        // arbitrarios. Para roundtrip del campo
-                        // `update`, ver `update_config_roundtrip`. proptest
-                        // no soporta tuplas de 13+ estrategias.
-                        update: UpdateConfig {
-                            auto_update: use_gpu,
-                            check_interval_hours: n_threads.map(|n| n as u32).unwrap_or(24),
-                            channel: "stable".into(),
-                            last_check: None,
-                            skipped_version: None,
-                        },
+                    )| {
+                        let voice_seed = input_device.as_deref().unwrap_or("af_heart").to_owned();
+                        Self {
+                            hotkey,
+                            model,
+                            language_ui,
+                            use_gpu,
+                            n_threads,
+                            theme,
+                            stt_mode,
+                            ui_language,
+                            prompt_preset,
+                            system_prompt,
+                            effort,
+                            input_device,
+                            // UpdateConfig se genera fijo con defaults
+                            // arbitrarios. Para roundtrip del campo
+                            // `update`, ver `update_config_roundtrip`. proptest
+                            // no soporta tuplas de 13+ estrategias.
+                            update: UpdateConfig {
+                                auto_update: use_gpu,
+                                check_interval_hours: n_threads.map(|n| n as u32).unwrap_or(24),
+                                channel: "stable".into(),
+                                last_check: None,
+                                skipped_version: None,
+                            },
+                            tts: TtsConfig {
+                                enabled: use_gpu,
+                                engine: if use_gpu {
+                                    TtsEngineKind::Kokoro
+                                } else {
+                                    TtsEngineKind::Piper
+                                },
+                                voice: voice_seed,
+                                speed_milli: 1000,
+                                on_hotkey: use_gpu,
+                                hotkey: default_tts_hotkey(),
+                                on_selection: false,
+                            },
+                        }
                     },
                 )
                 .boxed()
@@ -583,6 +703,66 @@ mod tests {
         assert_eq!(cfg.update.channel, "stable");
         assert!(cfg.update.last_check.is_none());
         assert!(cfg.update.skipped_version.is_none());
+    }
+
+    /// Configs previos a la introducción del sistema TTS deben parsear
+    /// con `TtsConfig::default()`: Piper activo, voz ES, velocidad 1.0×,
+    /// `on_hotkey = true`, `on_selection = false`, `enabled = true`.
+    /// Equivalente a "el usuario no había tocado TTS — todo el TTS
+    /// arranca en defaults razonables".
+    #[test]
+    fn backward_compat_missing_tts_field_uses_default() {
+        let json = r#"{"hotkey":"F9","model":"x.bin","language_ui":"en"}"#;
+        let cfg: Config = serde_json::from_str(json).expect("JSON sin tts debe parsear");
+        assert_eq!(cfg.tts, TtsConfig::default());
+        assert!(cfg.tts.enabled);
+        assert_eq!(cfg.tts.engine, TtsEngineKind::Piper);
+        assert_eq!(cfg.tts.voice, "es_ES-davefx-medium");
+        assert_eq!(cfg.tts.speed_milli, 1000);
+        assert!(cfg.tts.on_hotkey);
+        assert_eq!(cfg.tts.hotkey, "Ctrl+Shift+S");
+        assert!(!cfg.tts.on_selection);
+    }
+
+    /// `TtsConfig` se serializa como un objeto anidado bajo `tts` para
+    /// que el usuario pueda editarlo a mano en `config.json`.
+    #[test]
+    fn tts_config_serializes_as_nested_object() {
+        let cfg = Config {
+            tts: TtsConfig {
+                enabled: false,
+                engine: TtsEngineKind::Kokoro,
+                voice: "af_heart".into(),
+                speed_milli: 1500,
+                on_hotkey: false,
+                hotkey: "Ctrl+Alt+S".into(),
+                on_selection: true,
+            },
+            ..Config::default()
+        };
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        let json = std::str::from_utf8(&bytes).unwrap();
+        assert!(json.contains("\"tts\""), "debe aparecer clave tts: {json}");
+        assert!(json.contains("\"enabled\":false"));
+        assert!(json.contains("\"engine\":\"kokoro\""));
+        assert!(json.contains("\"voice\":\"af_heart\""));
+        assert!(json.contains("\"speed_milli\":1500"));
+        assert!(json.contains("\"on_hotkey\":false"));
+        assert!(json.contains("\"hotkey\":\"Ctrl+Alt+S\""));
+        assert!(json.contains("\"on_selection\":true"));
+    }
+
+    /// `TtsEngineKind` se serializa en minúsculas para que el usuario
+    /// pueda editar `config.json` a mano.
+    #[test]
+    fn tts_engine_serializes_lowercase() {
+        for (kind, expected) in [
+            (TtsEngineKind::Kokoro, "\"kokoro\""),
+            (TtsEngineKind::Piper, "\"piper\""),
+        ] {
+            let s = serde_json::to_string(&kind).unwrap();
+            assert_eq!(s, expected, "TtsEngineKind::{kind:?} esperaba {expected}");
+        }
     }
 
     /// Defaults de `UpdateConfig`: auto_update=true, 24h, "stable",

@@ -119,6 +119,10 @@ mod tests {
             let (_, res) = self.next.lock().unwrap().take().unwrap();
             res
         }
+
+        fn read_selection(&self) -> Result<String, InjectError> {
+            Err(InjectError::Unsupported("mock read_selection".into()))
+        }
     }
 
     /// Mock de `Injector` (fallback) que registra cada llamada.

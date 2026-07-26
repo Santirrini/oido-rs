@@ -25,6 +25,23 @@ pub trait DirectInjector: Send + Sync + std::fmt::Debug + 'static {
     /// (no soporta foco de teclado, es un botón/lista, no expone pattern
     /// compatible, etc.) devuelve `Err(InjectError::NotEditable)`.
     fn inject_focused(&self, text: &str) -> Result<(), InjectError>;
+
+    /// Lee el texto actualmente seleccionado en el elemento que tiene
+    /// foco de teclado en este momento (sólo Windows: UIA `TextPattern`
+    /// o `Text::get_selection` según el control; otros OS devuelven
+    /// `InjectError::Unsupported` desde el stub).
+    ///
+    /// Comportamiento esperado:
+    /// - **Edit con selección**: devuelve el texto seleccionado (puede
+    ///   ser cadena vacía si no hay selección activa — caso
+    ///   fisiológico).
+    /// - **Edit sin selección (sólo caret)**: devuelve cadena vacía (no
+    ///   es error). El caller decide si leer toda la línea.
+    /// - **Focused no editable o sin pattern**: `InjectError::Unsupported`
+    ///   para que el caller (SelectionReader) caiga al fallback de
+    ///   clipboard + Ctrl+C.
+    /// - **Focused sin focus de teclado real**: `InjectError::Unsupported`.
+    fn read_selection(&self) -> Result<String, InjectError>;
 }
 
 #[cfg(target_os = "windows")]

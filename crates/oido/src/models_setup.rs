@@ -90,7 +90,7 @@ pub(crate) fn resolve_prompt_text(snap: &oido_config::Config) -> String {
 /// Devuelve `true` si hubo algún cambio persistido, `false` si la
 /// config ya estaba sana.
 pub(crate) fn sanitize_config(cfg: &oido_config::ConfigStore) -> bool {
-    use oido_config::PromptPreset;
+    use oido_config::{PromptPreset, TtsEngineKind};
 
     let mut snap = cfg.snapshot();
     let mut changed = false;
@@ -105,13 +105,40 @@ pub(crate) fn sanitize_config(cfg: &oido_config::ConfigStore) -> bool {
         changed = true;
     }
 
+    // TTS: si la voz actual NO es una voz Piper/Kokoro válida (p.ej.
+    // quedó contaminada por el bug F6 del "tts_voice_submenu" capturado
+    // como voz), reescribimos a la voz default del engine activo. Esta
+    // corrección evita que el usuario se quede sin audio hablando con
+    // un id inválido.
+    let valid_voice = oido_tts::voices::known_voice_ids();
+    if !valid_voice.contains(&snap.tts.voice.as_str()) {
+        let old_voice = std::mem::replace(&mut snap.tts.voice, String::new());
+        let fallback = oido_tts::PiperEngine::default_voice_id();
+        snap.tts.voice = fallback.to_string();
+        tracing::warn!(
+            from = %old_voice,
+            to = %snap.tts.voice,
+            engine = ?snap.tts.engine,
+            "config: tts.voice inválida; corrigiendo a default del engine activo"
+        );
+        changed = true;
+    }
+
+    // Kokoro: si está activo el motor Kokoro, advertimos que sólo
+    // soporta inglés fluidamente y forzamos `on_selection=false`
+    // porque la heurística de detección ES/Kokoro aún no está en uso.
+    if snap.tts.engine == TtsEngineKind::Kokoro && snap.tts.on_selection {
+        tracing::warn!(
+            "Kokoro no soporta G2P español limpio en v1; forzando on_selection=false"
+        );
+        snap.tts.on_selection = false;
+        changed = true;
+    }
+
     if changed {
         cfg.replace(snap);
         if let Err(e) = cfg.save() {
             tracing::error!(?e, "sanitize_config: no se pudo persistir la corrección");
-            // Devolvemos `false` para no engañar al caller: si la
-            // persistencia falló, la corrección solo vive en memoria y
-            // se perderá en el próximo arranque.
             return false;
         }
     }

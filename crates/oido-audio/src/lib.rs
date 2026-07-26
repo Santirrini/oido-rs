@@ -16,6 +16,23 @@ use crossbeam_channel::{Receiver, Sender};
 
 use thiserror::Error;
 
+/// PCM mono f32 con su sample rate. Lo que devuelve cada engine TTS.
+/// TODO: deduplicar con `oido_tts::AudioChunk` cuando el acoplamiento de
+/// crates permita compartir este tipo sin introducir dependencias cíclicas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioChunk {
+    pub samples: Vec<f32>,
+    pub sample_rate_hz: u32,
+}
+
+impl AudioChunk {
+    #[must_use]
+    pub fn silence(duration_ms: u32, sample_rate_hz: u32) -> Self {
+        let n = (sample_rate_hz as usize * duration_ms as usize) / 1000;
+        Self { samples: vec![0.0; n], sample_rate_hz }
+    }
+}
+
 /// Errores del crate. Una sola variante (`Capture`) — si en el futuro
 /// se quiere distinguir errores del resampler vs del dispositivo, se
 /// añaden variantes aquí (manteniendo el enum por dominio, sin filtrar
@@ -24,6 +41,8 @@ use thiserror::Error;
 pub enum AudioError {
     #[error("captura de audio falló: {0}")]
     Capture(String),
+    #[error("reproducción de audio falló: {0}")]
+    Playback(String),
 }
 
 /// Frame de audio PCM mono. El pipeline de `oido-core` lo entrega al
@@ -63,9 +82,43 @@ pub trait CaptureSource: Send + std::fmt::Debug + 'static {
     fn sample_rate_hz(&self) -> u32;
 }
 
+pub trait PlaybackSink: Send + Sync + std::fmt::Debug + 'static {
+    fn enqueue(&self, chunk: AudioChunk) -> Result<(), AudioError>;
+    fn cancel_and_play(&self, chunk: AudioChunk) -> Result<(), AudioError>;
+    fn stop(&self) -> Result<(), AudioError>;
+    fn is_playing(&self) -> bool;
+    fn device_sample_rate_hz(&self) -> u32;
+}
+
+/// Stub inerte de PlaybackSink. Usado como fallback si `CpalPlayback::new`
+/// falla (e.g. SO sin dispositivo de salida, o tests). Cumple el trait
+/// descartando los chunks silenciosamente.
+#[derive(Debug)]
+pub struct CpalPlaybackStub;
+
+impl PlaybackSink for CpalPlaybackStub {
+    fn enqueue(&self, _chunk: AudioChunk) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn cancel_and_play(&self, _chunk: AudioChunk) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn stop(&self) -> Result<(), AudioError> {
+        Ok(())
+    }
+    fn is_playing(&self) -> bool {
+        false
+    }
+    fn device_sample_rate_hz(&self) -> u32 {
+        48_000
+    }
+}
+
 mod capture;
+mod playback;
 
 pub use capture::{
     list_input_devices, pick_best_device, probe_devices, CpalCapture, DeviceProbe, InputDeviceInfo,
     Resampler,
 };
+pub use playback::CpalPlayback;
