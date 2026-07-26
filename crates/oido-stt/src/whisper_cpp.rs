@@ -246,25 +246,25 @@ pub(crate) fn preset_settings(preset: oido_config::EffortPreset) -> EffortSettin
             length_penalty: None,
         },
         // === Robust ===
-        // Greedy best_of=1, temperature_inc=0.0 (sin reintentos),
-        // entropy_thold estricto (1.8) para descartar segmentos
-        // inseguros en vez de reintentar.
+        // Greedy best_of=1, temperature_inc=0.2, entropy_thold=2.0.
         //
         // Evolución de este preset:
-        //   v1: best_of=5, temperature_inc=0.2 → 17-20 s en audio
-        //       ambiguo (5 muestras × 5 reintentos de temperatura).
-        //   v2: best_of=1, temperature_inc=0.2 → 7-10 s (sin sampling
-        //       redundante, pero aún 5 pasadas del decoder por segmento
-        //       cuando la entropía falla).
-        //   v3 (actual): best_of=1, temperature_inc=0.0 → ~450 ms
-        //       consistentes. Sin reintentos del decoder; el pipeline
-        //       tiene phrase_filter + single-word guard como red de
-        //       seguridad post-STT.
+        //   v1: best_of=5, temp_inc=0.2, entropy=1.8 → 17-20 s
+        //       (5 muestras × hasta 5 reintentos por segmento).
+        //   v2: best_of=1, temp_inc=0.2, entropy=1.8 → 7-10 s
+        //       (entropy muy estricta → muchos reintentos en cascada).
+        //   v3: best_of=1, temp_inc=0.0, entropy=1.8 → loops infinitos
+        //       (sin escape de temperatura → "Hola × 110").
+        //   v4 (actual): best_of=1, temp_inc=0.2, entropy=2.0
+        //       - entropy=2.0 (vs 1.8): menos segmentos fallan el check
+        //         → menos reintentos → latencia media ~450-800 ms.
+        //       - temp_inc=0.2: cuando sí falla, el decoder puede escapar
+        //         del loop de repetición con temperatura más alta.
         EffortPreset::Robust => EffortSettings {
             strategy: SamplingStrategy::Greedy { best_of: 1 },
             temperature: 0.0,
-            temperature_inc: 0.0,
-            entropy_thold: 1.8,
+            temperature_inc: 0.2,
+            entropy_thold: 2.0,
             length_penalty: None,
         },
         // === HighQuality ===
@@ -900,18 +900,17 @@ mod tests {
             s.temperature_inc
         );
 
-        // Robust y HighQuality son más estrictos con la entropía.
+        // Robust: entropy relajado a 2.0 (menos reintentos en cascada)
+        // pero con temperature_inc=0.2 para escapar de loops.
         let s_robust = preset_settings(oido_config::EffortPreset::Robust);
         assert!(
-            (s_robust.entropy_thold - 1.8).abs() < f32::EPSILON,
-            "Robust esperaba entropy=1.8, obtuve {}",
+            (s_robust.entropy_thold - 2.0).abs() < f32::EPSILON,
+            "Robust esperaba entropy=2.0, obtuve {}",
             s_robust.entropy_thold
         );
-        // Robust usa temperature_inc=0.0 (sin reintentos del decoder)
-        // para latencia consistente ~450ms en hold-to-talk.
         assert!(
-            s_robust.temperature_inc.abs() < f32::EPSILON,
-            "Robust esperaba temperature_inc=0.0, obtuve {}",
+            (s_robust.temperature_inc - 0.2).abs() < f32::EPSILON,
+            "Robust esperaba temperature_inc=0.2, obtuve {}",
             s_robust.temperature_inc
         );
 
