@@ -386,10 +386,10 @@ fn main() -> Result<()> {
         GpuConfig::default()
     };
 
-    // n_threads por worker: con N workers en paralelo, dividir el total
-    // entre ellos evita oversubscription. `STT_WORKERS` viene de
-    // oido-core (única fuente de verdad) para evitar que el cálculo
-    // se desincronice si cambia el tamaño del pool.
+    // n_threads por worker: con STT_WORKERS=1, el worker único usa todos
+    // los threads disponibles (hasta 8). La división es identidad pero se
+    // mantiene para no romper si STT_WORKERS cambia en el futuro.
+    // `STT_WORKERS` viene de oido-core (única fuente de verdad).
     let n_threads_per_worker = snap.n_threads.unwrap_or_else(|| {
         let total = std::thread::available_parallelism()
             .map(|n| n.get() as u16)

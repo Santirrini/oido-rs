@@ -91,16 +91,25 @@ struct BufferState {
 type SttJob = Vec<f32>;
 
 /// Capacidad del canal STT. Hold-to-talk: 6 para dar margen extra sin
-/// riesgo de OOM y soportar ráfagas de 3+ activaciones consecutivas
-/// mientras los 2 workers procesan los buffers previos.
+/// riesgo de OOM y soportar ráfagas de activaciones consecutivas
+/// mientras el worker procesa el buffer previo.
 const STT_QUEUE_CAP: usize = 6;
 
-/// Número de workers STT que `Pipeline::start` arranca en paralelo.
+/// Número de workers STT que `Pipeline::start` arranca.
+///
+/// **1 worker** (no paralelo): whisper.cpp en CPU usa todos los
+/// `n_threads` del proceso. Con 2 workers en paralelo cada uno con
+/// `n_threads/2`, la contención de caché L1/L2 provocaba slowdowns
+/// de 40-50× en inferencias simultáneas (caso real: 445 ms solo →
+/// 20 s en paralelo para el mismo audio). En GPU, whisper.cpp
+/// serializa internamente así que 2 workers tampoco aportan.
+///
+/// La cola `STT_QUEUE_CAP` maneja ráfagas de activaciones;
+/// un solo worker las drena secuencialmente con throughput óptimo.
+///
 /// Se expone como `pub` para que el bin `oido` pueda derivar el
-/// número de threads por worker (`Config::n_threads / STT_WORKERS`)
-/// sin duplicar el literal "2" (que se desincroniza silenciosamente
-/// si cambia aquí).
-pub const STT_WORKERS: u16 = 2;
+/// número de threads por worker sin duplicar el literal.
+pub const STT_WORKERS: u16 = 1;
 
 #[derive(Debug)]
 pub struct Pipeline {
