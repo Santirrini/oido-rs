@@ -246,12 +246,17 @@ pub(crate) fn preset_settings(preset: oido_config::EffortPreset) -> EffortSettin
             length_penalty: None,
         },
         // === Robust ===
-        // Greedy best_of=5 + temperature_inc=0.2 (reintenta con
-        // temperaturas más altas si falla) + entropy_thold más estricto
-        // para descartar segmentos inseguros. ~1.5-2× más lento que
-        // Balanced pero más tolerante a audio ruidoso/ambiguo.
+        // Greedy best_of=1 + temperature_inc=0.2 (reintenta con
+        // temperatura más alta si la primera pasada falla) +
+        // entropy_thold más estricto para descartar segmentos inseguros.
+        //
+        // Antes usaba best_of=5: cada reintento de temperatura hacía 5
+        // pasadas greedy, causando spikes de 17-20 s en audio ambiguo
+        // (40× más lento que best_of=1). En hold-to-talk la latencia
+        // importa más que exprimir calidad marginal, y el pipeline ya
+        // tiene phrase_filter + single-word guard como red de seguridad.
         EffortPreset::Robust => EffortSettings {
-            strategy: SamplingStrategy::Greedy { best_of: 5 },
+            strategy: SamplingStrategy::Greedy { best_of: 1 },
             temperature: 0.0,
             temperature_inc: 0.2,
             entropy_thold: 1.8,
