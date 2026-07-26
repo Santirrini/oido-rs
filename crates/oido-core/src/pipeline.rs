@@ -356,34 +356,6 @@ fn process_one(
         w.write_dictation(&buffer);
     }
 
-    // === Pre-STT silence gate ===
-    // Buffers cortos con mayoría de casi-silencio son típicamente un
-    // click de hotkey sin habla: pasarlos a whisper.cpp produce
-    // alucinaciones single-word / repetition-loop (caso real del log:
-    // 1.5 s @ 0.32 → "Documentación.", 2.3 s @ 0.38 → "Documentación,
-    // documentación, ..."). Más barato y robusto cazarlos acá que
-    // añadir heuristics al output de whisper.
-    //
-    // ponytail: piso 0.5 s + techo 3.0 s × 0.30 de near_zero_frac.
-    // Piso de 0.5 s protege los E2E tests (mandan 300-500 ms de
-    // silencio de fixture) y evita disparos espurios en clips
-    // demasiado cortos para que las stats sean representativas. Techo
-    // y fracción calibrados contra las sesiones reales del log: 39.8 s
-    // @ 0.07, 58.9 s @ 0.37 y 3.7 s @ 0.23 pasan; las dos alucinadas
-    // (1.5 s @ 0.32 y 2.3 s @ 0.38) caen. Subir el techo o bajar la
-    // fracción si llegan reportes de falsos-positivos en utterances
-    // cortos.
-    if audio_seconds > 0.5 && audio_seconds < 3.0 && stats.near_zero_frac > 0.30 {
-        tracing::info!(
-            samples,
-            audio_seconds,
-            near_zero_frac = format!("{:.2}", stats.near_zero_frac),
-            "audio descartado por gate de silencia (muy poco habla)"
-        );
-        let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
-        return;
-    }
-
     // STT. Bloquea (whisper.cpp es CPU/GPU-bound).
     let started = Instant::now();
     let text = {
@@ -400,13 +372,46 @@ fn process_one(
     };
     let stt_latency = started.elapsed();
 
-    // Anti-alucinación (exact match contra blacklist ES+EN).
-    if phrase_filter::filter(&text).is_none() {
+    // Anti-alucinación (exact match contra blacklist ES+EN + repetition
+    // guard con señal de audio).
+    if phrase_filter::filter_with_signal(&text, Some(&stats)).is_none() {
         tracing::info!(
             ?text,
             stt_latency_ms = stt_latency.as_millis() as u64,
             audio_seconds,
             "frase descartada por filtro"
+        );
+        let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
+        return;
+    }
+
+    // === Single-word short-output guard ===
+    // Caso del log: tras un press-relámpago del hotkey (1.3-1.5 s)
+    // whisper emite una única palabra ("Documento.", "Documento")
+    // que NO es alucinación de palabras-repetidas (no hay pattern de
+    // loop detectable) pero tampoco es dictado útil: una sola palabra
+    // en 1.5 s de audio es firma de click sin habla. Lo descartamos
+    // acá.
+    //
+    // ponytail: piso 0.5 s protege los E2E tests (mandan 300-500 ms
+    // de silencio). Techo 3.0 s evita tragarse utterances cortos
+    // REALES como "Sí." de 2 s (peak alto). Subir el techo o bajar
+    // la fracción si llegan falsos-positivos en utterances cortos.
+    //
+    // Refinamiento por señal: si el audio tiene peak > -20 dBFS la
+    // persona HABLÓ de verdad — una sola palabra es dictado legítimo
+    // ("Documento" con peak -13.9 dBFS). Solo descartamos cuando el
+    // peak es bajo (audio mayormente silencioso / click sin habla).
+    let word_count = text.split_whitespace().count();
+    let has_strong_signal = stats.peak_dbfs > -20.0;
+    if word_count == 1 && audio_seconds > 0.5 && audio_seconds < 3.0 && !has_strong_signal {
+        tracing::info!(
+            ?text,
+            samples,
+            audio_seconds,
+            peak_dbfs = format!("{:.1}", stats.peak_dbfs),
+            near_zero_frac = format!("{:.2}", stats.near_zero_frac),
+            "single-word short output descartado (sospecha de alucinación)"
         );
         let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
         return;

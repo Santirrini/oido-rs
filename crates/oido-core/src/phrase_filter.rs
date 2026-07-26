@@ -1,5 +1,9 @@
 //! Filtro de frases alucinadas por whisper.cpp.
 //!
+//! La variante `filter_with_signal` acepta stats de audio opcionales
+//! para relajar los umbrales del short-text repetition guard cuando
+//! el audio tiene señal fuerte (habla real, no silencio + alucinación).
+//!
 //! Tres capas complementarias:
 //!
 //! 1. **Blacklist** (`FILTER_PHRASES`): match exacto contra frases
@@ -36,6 +40,13 @@
 //! el pipeline: anclar el initial_prompt del decoder (`no_context=false`
 //! en `build_base_params`) para que el modelo tenga contexto léxico y no
 //! divague al final de segmentos largos.
+
+use crate::debug_dump::AudioStats;
+
+/// Umbral de peak en dBFS por encima del cual consideramos que el audio
+/// tiene señal fuerte (habla real). -20 dBFS es conservador: cualquier
+/// voz a distancia normal del micrófono supera este valor.
+const STRONG_SIGNAL_PEAK_DBFS: f32 = -20.0;
 
 /// Lista cerrada de frases a descartar. Match exacto contra
 /// `trim().to_lowercase()`. ES + EN mezcladas.
@@ -105,19 +116,66 @@ pub fn is_filtered(text: &str) -> bool {
 ///    `words.len()` para no desfavorecer n-gramas largos.
 #[must_use]
 pub fn is_repetition_loop(text: &str) -> bool {
+    is_repetition_loop_inner(text, false)
+}
+
+/// Variante que relaja umbrales cuando el audio tiene señal fuerte.
+///
+/// Cuando `stats.peak_dbfs > STRONG_SIGNAL_PEAK_DBFS` la persona habló
+/// de verdad y repeticiones cortas como "Hola, Hola." o "Hola, Hola,
+/// Hola." son dictado legítimo, no alucinación de silencio. Los
+/// umbrales de la capa short-text se suben +2 para no tragar esas
+/// frases (la alucinación real viene de audio silencioso, no de habla
+/// con peak > -20 dBFS).
+#[must_use]
+pub fn is_repetition_loop_with_signal(text: &str, stats: Option<&AudioStats>) -> bool {
+    let strong = stats.is_some_and(|s| s.peak_dbfs > STRONG_SIGNAL_PEAK_DBFS);
+    is_repetition_loop_inner(text, strong)
+}
+
+fn is_repetition_loop_inner(text: &str, strong_signal: bool) -> bool {
     let normalized = text.trim().to_lowercase();
     let words: Vec<&str> = normalized.split_whitespace().collect();
 
     // === Short-text loop (capa 1) ===
     // Texto con ≤ SHORT_LOOP_MAX_WORDS palabras: cualquier unigrama
     // que aparezca ≥ SHORT_LOOP_MIN_COUNT veces es firma de
-    // alucinación. No exigimos cobertura (% del texto) porque con
-    // counts tan bajos (3) cualquier proporción razonable ya dispara
-    // y la métrica mete ruido. La prosa legítima de 2-5 palabras
-    // nunca tiene el MISMO token repetido 3+ veces.
+    // alucinación. Tiered para no tragar prosa legítima:
+    // - ≤ 3 palabras: 2 reps del mismo unigrama → alucinación
+    //   (cubre "Documento, documento." que es el caso del log).
+    // - 4-5 palabras: 3 reps del mismo unigrama → alucinación
+    //   (ej. "Documento, documento, documento.").
+    // - > 5 palabras: cae a la capa principal.
+    //
+    // Cuando `strong_signal` es true (audio con peak > -20 dBFS),
+    // los umbrales suben +2: tier 1 pasa de 2→4, tier 2 de 3→5.
+    // Esto deja pasar "Hola, Hola." y "Hola, Hola, Hola." que son
+    // dictado real con señal fuerte.
+    //
+    // La prosa legítima de 2-5 palabras nunca tiene el MISMO token
+    // repetido 3+ veces; "hola hola cómo estás bien" (2 reps) pasa
+    // porque está en el tier 4-5 que exige 3 reps.
+    //
+    // Importante: comparamos sobre la versión del unigrama SIN
+    // puntuación final (`documento,` → `documento`). Si no, "doc,"
+    // y "doc." cuentan como unigramas distintos y la alucinación
+    // real del log ("Documento, documento." → 2 unigramas diferentes
+    // por la coma/punto) nunca dispara el filtro.
     if words.len() <= SHORT_LOOP_MAX_WORDS {
-        let (_unit, unit_count) = most_frequent_ngram(&words, 1);
-        if unit_count >= SHORT_LOOP_MIN_COUNT {
+        let normalized_words: Vec<String> = words
+            .iter()
+            .map(|w| w.trim_end_matches(|c: char| c.is_ascii_punctuation()).to_string())
+            .collect();
+        let normalized_refs: Vec<&str> =
+            normalized_words.iter().map(String::as_str).collect();
+        let (_, unit_count) = most_frequent_ngram(&normalized_refs, 1);
+        let signal_boost: usize = if strong_signal { 2 } else { 0 };
+        let min_count = if words.len() <= 3 {
+            SHORT_LOOP_MIN_COUNT_TIER1 + signal_boost
+        } else {
+            SHORT_LOOP_MIN_COUNT_TIER2 + signal_boost
+        };
+        if unit_count >= min_count {
             return true;
         }
     }
@@ -195,6 +253,20 @@ pub fn filter(text: &str) -> Option<&str> {
     }
 }
 
+/// Variante de `filter` con señal de audio para relajar el short-text
+/// repetition guard cuando el audio tiene habla real.
+#[must_use]
+pub fn filter_with_signal<'a>(text: &'a str, stats: Option<&AudioStats>) -> Option<&'a str> {
+    if is_filtered(text)
+        || is_repetition_loop_with_signal(text, stats)
+        || is_likely_artifact(text)
+    {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 // ---------------- Repetition Guard internals ----------------
 
 /// Caracteres de puntuación de cierre cuyo uso como primer token del
@@ -211,13 +283,14 @@ const CONTINUATION_PUNCT: &[char] = &[',', '.', ';', ':', '!', '?'];
 /// frase corta de dictado legible caben en ≤5, pero las alucinaciones
 /// cortas de whisper (single-word loop, 3-4 repeticiones) caen aquí.
 const SHORT_LOOP_MAX_WORDS: usize = 5;
-/// Mínimo de repeticiones del MISMO unigrama para considerar loop
-/// corto. 3 es el corte seguro: el caso real del log ("Documentación,
-/// documentación, documentación, documentación.") tiene 3 unigramas
-/// idénticos, y prosa legítima de 2-5 palabras nunca acumula 3
-/// repeticiones del mismo token. Con 2 dispararía con "hola hola"
-/// aislado (falso positivo).
-const SHORT_LOOP_MIN_COUNT: usize = 3;
+/// Tier 1: para texto de ≤ 3 palabras, 2 repeticiones del mismo
+/// unigrama son alucinación. Cubre el caso del log "Documento,
+/// documento." (2 reps, 2 palabras).
+const SHORT_LOOP_MIN_COUNT_TIER1: usize = 2;
+/// Tier 2: para texto de 4-5 palabras, 3 repeticiones del mismo
+/// unigrama son alucinación. "Documento, documento, documento." cae
+/// acá. "hola hola cómo estás bien" pasa (2 reps < 3).
+const SHORT_LOOP_MIN_COUNT_TIER2: usize = 3;
 
 /// Longitud máxima del n-grama a probar (1=palabra ... 6=frase corta).
 ///
@@ -358,15 +431,6 @@ mod tests {
         assert!(!is_repetition_loop("hola mundo"));
     }
 
-    /// 2 repeticiones del mismo unigrama en 5 palabras (tope de la capa
-    /// short-text) NO dispara: count=2 < SHORT_LOOP_MIN_COUNT=3. Es
-    /// prosa legítima (catch-phrase corto, muletilla, etc.).
-    #[test]
-    fn short_text_two_reps_in_five_words_passes() {
-        let s = "hola hola cómo estás bien";
-        assert!(!is_repetition_loop(s));
-    }
-
     #[test]
     fn real_world_user_alucination_caught() {
         let loop_text = "Y yo, en español, me voy a decir que me voy a decir que \
@@ -426,10 +490,42 @@ mod tests {
 
     #[test]
     fn short_text_passes() {
-        // Texto corto que no es loop: 2 reps del mismo unigrama está
-        // por debajo del SHORT_LOOP_MIN_COUNT=3.
-        assert!(!is_repetition_loop("hola hola"));
+        // Texto corto sin pattern de loop. Con el tiered threshold:
+        // - 1 palabra: count=1 < 2 → pasa.
+        // - 2 palabras distintas: max count=1 < 2 → pasa.
+        assert!(!is_repetition_loop("hola"));
         assert!(!is_repetition_loop("uno dos"));
+    }
+
+    /// Tier 1: 2 reps del mismo unigrama en 2 palabras (≤ 3) → loop.
+    /// Caso del log: "Documento, documento.".
+    #[test]
+    fn short_text_two_reps_in_two_words_caught() {
+        let s = "Documento, documento.";
+        assert!(
+            is_repetition_loop(s),
+            "2 reps en 2 palabras debe cazarse (tier 1)"
+        );
+        assert_eq!(filter(s), None);
+    }
+
+    /// Tier 2: 2 reps del mismo unigrama en 5 palabras (> 3) → NO
+    /// loop. Prosa legítima: "hola hola cómo estás bien".
+    #[test]
+    fn short_text_two_reps_in_five_words_passes() {
+        let s = "hola hola cómo estás bien";
+        assert!(
+            !is_repetition_loop(s),
+            "2 reps en 5 palabras pasa (tier 2 exige 3)"
+        );
+    }
+
+    /// Tier 2: 3 reps del mismo unigrama en 4 palabras (> 3) → loop.
+    /// "Documento, documento, documento, fin" tiene 3 reps + 1 distinta.
+    #[test]
+    fn short_text_three_reps_in_four_words_caught() {
+        let s = "documento documento documento fin";
+        assert!(is_repetition_loop(s));
     }
 
     #[test]
@@ -501,5 +597,71 @@ mod tests {
         assert!(!is_likely_artifact("The quick brown fox"));
         assert!(!is_likely_artifact(""));
         assert!(!is_likely_artifact("   "));
+    }
+
+    // ---------------- Signal-aware tests ----------------
+
+    fn strong_signal() -> AudioStats {
+        AudioStats {
+            rms_dbfs: -28.0,
+            peak_dbfs: -12.0, // Well above -20 dBFS threshold
+            near_zero_frac: 0.05,
+        }
+    }
+
+    fn weak_signal() -> AudioStats {
+        AudioStats {
+            rms_dbfs: -50.0,
+            peak_dbfs: -35.0, // Below -20 dBFS threshold
+            near_zero_frac: 0.85,
+        }
+    }
+
+    /// "Hola, Hola." with strong signal is legitimate dictation.
+    #[test]
+    fn short_repetition_with_strong_signal_passes() {
+        let s = "Hola, Hola.";
+        let stats = strong_signal();
+        // Without signal: caught (2 reps, tier 1, min=2)
+        assert!(is_repetition_loop(s));
+        // With strong signal: passes (tier 1 min bumped to 3)
+        assert!(!is_repetition_loop_with_signal(s, Some(&stats)));
+        assert_eq!(filter_with_signal(s, Some(&stats)), Some(s));
+    }
+
+    /// "Hola, Hola, Hola." with strong signal is legitimate dictation.
+    #[test]
+    fn three_reps_with_strong_signal_passes() {
+        let s = "Hola, Hola, Hola.";
+        let stats = strong_signal();
+        // Without signal: caught (3 reps, tier 1, min=2)
+        assert!(is_repetition_loop(s));
+        // With strong signal: passes (tier 1 min = 2+2 = 4, count = 3 < 4)
+        assert!(!is_repetition_loop_with_signal(s, Some(&stats)));
+        assert_eq!(filter_with_signal(s, Some(&stats)), Some(s));
+    }
+
+    /// "Hola, Hola." with weak signal is hallucination — stays filtered.
+    #[test]
+    fn short_repetition_with_weak_signal_caught() {
+        let s = "Hola, Hola.";
+        let stats = weak_signal();
+        assert!(is_repetition_loop_with_signal(s, Some(&stats)));
+        assert_eq!(filter_with_signal(s, Some(&stats)), None);
+    }
+
+    /// Without stats (None), behaves like default filter (no boost).
+    #[test]
+    fn filter_with_signal_none_equals_default() {
+        let s = "Hola, Hola.";
+        assert_eq!(filter_with_signal(s, None), filter(s));
+    }
+
+    /// Long repetition loops are caught regardless of signal strength.
+    #[test]
+    fn long_loop_caught_even_with_strong_signal() {
+        let s = "hola hola hola hola hola hola hola hola hola hola";
+        let stats = strong_signal();
+        assert!(is_repetition_loop_with_signal(s, Some(&stats)));
     }
 }
