@@ -356,6 +356,34 @@ fn process_one(
         w.write_dictation(&buffer);
     }
 
+    // === Pre-STT silence gate ===
+    // Buffers cortos con mayoría de casi-silencio son típicamente un
+    // click de hotkey sin habla: pasarlos a whisper.cpp produce
+    // alucinaciones single-word / repetition-loop (caso real del log:
+    // 1.5 s @ 0.32 → "Documentación.", 2.3 s @ 0.38 → "Documentación,
+    // documentación, ..."). Más barato y robusto cazarlos acá que
+    // añadir heuristics al output de whisper.
+    //
+    // ponytail: piso 0.5 s + techo 3.0 s × 0.30 de near_zero_frac.
+    // Piso de 0.5 s protege los E2E tests (mandan 300-500 ms de
+    // silencio de fixture) y evita disparos espurios en clips
+    // demasiado cortos para que las stats sean representativas. Techo
+    // y fracción calibrados contra las sesiones reales del log: 39.8 s
+    // @ 0.07, 58.9 s @ 0.37 y 3.7 s @ 0.23 pasan; las dos alucinadas
+    // (1.5 s @ 0.32 y 2.3 s @ 0.38) caen. Subir el techo o bajar la
+    // fracción si llegan reportes de falsos-positivos en utterances
+    // cortos.
+    if audio_seconds > 0.5 && audio_seconds < 3.0 && stats.near_zero_frac > 0.30 {
+        tracing::info!(
+            samples,
+            audio_seconds,
+            near_zero_frac = format!("{:.2}", stats.near_zero_frac),
+            "audio descartado por gate de silencia (muy poco habla)"
+        );
+        let _ = event_tx.send(PipelineEvent::State(PipelineState::Idle));
+        return;
+    }
+
     // STT. Bloquea (whisper.cpp es CPU/GPU-bound).
     let started = Instant::now();
     let text = {

@@ -76,33 +76,59 @@ pub fn is_filtered(text: &str) -> bool {
 
 /// ¿El texto es un "bucle de repetición" típico de alucinación?
 ///
-/// Heurística: tokeniza por whitespace y para cada tamaño `n` de
-/// n-grama (1 a `MAX_NGRAM`) busca el n-grama más frecuente en el
-/// texto (no requiere contigüidad — la alucinación del usuario
-/// "me voy a decir que me voy a decir que ..." intercala un "que"
-/// entre repeticiones, así que no son contiguas). El texto se
-/// considera "loop" si la unidad repetida:
+/// Heurística en dos capas:
 ///
-/// 1. Aparece al menos `REPETITION_MIN_COUNT` veces en total.
-/// 2. Cubre al menos `REPETITION_COVERAGE_NUMERATOR /
-///    REPETITION_COVERAGE_DENOMINATOR` del texto total (en palabras).
+/// 1. **Short-text loop** (capa para salidas con ≤ 5 palabras):
+///    el `REPETITION_MIN_COUNT = 5` de la capa principal fue calibrado
+///    para transcripciones largas (≥ 20 palabras) y deja escapar
+///    alucinaciones cortas. Caso real del log: un buffer de 2.3 s
+///    mayormente silencioso produjo `"Documentación, documentación,
+///    documentación, documentación."` (4 palabras, 3 unigramas
+///    idénticos) — la capa principal lo deja pasar por el early return
+///    de `words.len() < REPETITION_MIN_COUNT`. Aquí lo cazamos con un
+///    umbral proporcional al tamaño del texto: ≥ 2 repeticiones del
+///    MISMO unigrama cubriendo ≥ 50% de las palabras.
 ///
-/// "Cubrir" significa: `unit.len() * unit_count` palabras del texto
-/// están dentro de repeticiones de esa unidad. Equivale a "la
-/// unidad repetida ocupa al menos la mitad del texto", pero se evalúa
-/// por longitud ya cubierta en lugar de ratio sobre `words.len()` para
-/// no desfavorecer n-gramas largos.
+/// 2. **Main loop** (capa histórica): tokeniza por whitespace y para
+///    cada tamaño `n` de n-grama (1 a `MAX_NGRAM`) busca el n-grama más
+///    frecuente en el texto (no requiere contigüidad — la alucinación
+///    del usuario "me voy a decir que me voy a decir que ..."
+///    intercala un "que" entre repeticiones, así que no son
+///    contiguas). El texto se considera "loop" si la unidad repetida:
+///    1. Aparece al menos `REPETITION_MIN_COUNT` veces en total.
+///    2. Cubre al menos `REPETITION_COVERAGE_NUMERATOR /
+///       REPETITION_COVERAGE_DENOMINATOR` del texto total (en palabras).
+///    "Cubrir" significa: `unit.len() * unit_count` palabras del texto
+///    están dentro de repeticiones de esa unidad. Equivale a "la
+///    unidad repetida ocupa al menos la mitad del texto", pero se
+///    evalúa por longitud ya cubierta en lugar de ratio sobre
+///    `words.len()` para no desfavorecer n-gramas largos.
 #[must_use]
 pub fn is_repetition_loop(text: &str) -> bool {
     let normalized = text.trim().to_lowercase();
     let words: Vec<&str> = normalized.split_whitespace().collect();
 
-    // Texto demasiado corto para ser un loop; dejarlo pasar.
+    // === Short-text loop (capa 1) ===
+    // Texto con ≤ SHORT_LOOP_MAX_WORDS palabras: cualquier unigrama
+    // que aparezca ≥ SHORT_LOOP_MIN_COUNT veces es firma de
+    // alucinación. No exigimos cobertura (% del texto) porque con
+    // counts tan bajos (3) cualquier proporción razonable ya dispara
+    // y la métrica mete ruido. La prosa legítima de 2-5 palabras
+    // nunca tiene el MISMO token repetido 3+ veces.
+    if words.len() <= SHORT_LOOP_MAX_WORDS {
+        let (_unit, unit_count) = most_frequent_ngram(&words, 1);
+        if unit_count >= SHORT_LOOP_MIN_COUNT {
+            return true;
+        }
+    }
+
+    // Texto demasiado corto para la capa principal; dejarlo pasar.
     // Mínimo necesario: REPETITION_MIN_COUNT repeticiones de un unigrama.
     if words.len() < REPETITION_MIN_COUNT {
         return false;
     }
 
+    // === Main loop (capa 2) ===
     let threshold = (words.len() * REPETITION_COVERAGE_NUMERATOR) / REPETITION_COVERAGE_DENOMINATOR;
 
     // Probar n-gramas de longitud 1, 2 y 3.
@@ -178,6 +204,20 @@ const CLOSING_PUNCT: &[char] = &[')', ']', '}', '»', '›'];
 /// Signos que pueden seguir a un cierre huérfano en el token alucinado
 /// (ej. `),`, `].`). Se saltan al buscar el contenido sustantivo.
 const CONTINUATION_PUNCT: &[char] = &[',', '.', ';', ':', '!', '?'];
+
+/// Tope de palabras para activar la capa short-text del repetition guard.
+/// Por encima de esta cantidad, la capa principal (con `REPETITION_MIN_COUNT`
+/// repeticiones) toma el control. 5 palabras es un buen corte: una sola
+/// frase corta de dictado legible caben en ≤5, pero las alucinaciones
+/// cortas de whisper (single-word loop, 3-4 repeticiones) caen aquí.
+const SHORT_LOOP_MAX_WORDS: usize = 5;
+/// Mínimo de repeticiones del MISMO unigrama para considerar loop
+/// corto. 3 es el corte seguro: el caso real del log ("Documentación,
+/// documentación, documentación, documentación.") tiene 3 unigramas
+/// idénticos, y prosa legítima de 2-5 palabras nunca acumula 3
+/// repeticiones del mismo token. Con 2 dispararía con "hola hola"
+/// aislado (falso positivo).
+const SHORT_LOOP_MIN_COUNT: usize = 3;
 
 /// Longitud máxima del n-grama a probar (1=palabra ... 6=frase corta).
 ///
@@ -276,6 +316,57 @@ mod tests {
     /// Caso del usuario: "Y yo, en español, me voy a decir que ..."
     /// repetido decenas de veces tras una frase introductoria. El bigrama
     /// "me voy" o "voy a" o el trigrama "me voy a" deberían disparar.
+    /// Caso real del log: buffer de 2.3 s mayormente silencioso. Whisper
+    /// emitió "Documentación, documentación, documentación, documentación."
+    /// (4 palabras, 3 unigramas idénticos). La capa principal lo deja
+    /// pasar por el early return `words.len() < REPETITION_MIN_COUNT`;
+    /// la capa short-text (≤ 5 palabras, ≥ 2 reps, ≥ 50% de cobertura)
+    /// lo caza.
+    #[test]
+    fn short_repetition_of_three_unigrams_caught() {
+        let s = "Documentación, documentación, documentación, documentación.";
+        assert!(
+            is_repetition_loop(s),
+            "repetición corta de unigrama (3/4 = 75%) debe filtrarse"
+        );
+        assert_eq!(filter(s), None);
+    }
+
+    /// Variante del anterior: 3 repeticiones del MISMO unigrama en 3
+    /// palabras. Cubre el caso de un loop corto "limpio" sin
+    /// puntuación que rompa el match.
+    #[test]
+    fn short_repetition_three_unigrams_clean_caught() {
+        let s = "vale vale vale";
+        assert!(is_repetition_loop(s));
+    }
+
+    /// Una sola palabra no se puede evaluar como loop (no hay patrón
+    /// repetible). Lo deja pasar, pero el pre-STT silence gate en
+    /// `process_one` es la segunda línea de defensa que blinda este
+    /// caso en producción.
+    #[test]
+    fn single_word_is_not_a_loop() {
+        assert!(!is_repetition_loop("Documentación."));
+        assert!(!is_repetition_loop("hola"));
+    }
+
+    /// Dos palabras distintas NO son loop: ningún unigrama llega al
+    /// `SHORT_LOOP_MIN_COUNT` (3).
+    #[test]
+    fn two_distinct_short_words_pass() {
+        assert!(!is_repetition_loop("hola mundo"));
+    }
+
+    /// 2 repeticiones del mismo unigrama en 5 palabras (tope de la capa
+    /// short-text) NO dispara: count=2 < SHORT_LOOP_MIN_COUNT=3. Es
+    /// prosa legítima (catch-phrase corto, muletilla, etc.).
+    #[test]
+    fn short_text_two_reps_in_five_words_passes() {
+        let s = "hola hola cómo estás bien";
+        assert!(!is_repetition_loop(s));
+    }
+
     #[test]
     fn real_world_user_alucination_caught() {
         let loop_text = "Y yo, en español, me voy a decir que me voy a decir que \
@@ -335,8 +426,9 @@ mod tests {
 
     #[test]
     fn short_text_passes() {
-        // Menos del mínimo de palabras para activar el detector.
-        assert!(!is_repetition_loop("hola hola hola"));
+        // Texto corto que no es loop: 2 reps del mismo unigrama está
+        // por debajo del SHORT_LOOP_MIN_COUNT=3.
+        assert!(!is_repetition_loop("hola hola"));
         assert!(!is_repetition_loop("uno dos"));
     }
 
