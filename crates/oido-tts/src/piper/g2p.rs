@@ -140,9 +140,11 @@ impl G2p {
             ))),
             Language::En => piper_plus_g2p::english::EnglishPhonemizer::new()
                 .map(|p| G2p::English(Arc::new(p)))
-                .map_err(|e| TtsError::Phonemization(format!(
-                    "no se pudo inicializar EnglishPhonemizer (¿falta CMUDict?): {e}"
-                ))),
+                .map_err(|e| {
+                    TtsError::Phonemization(format!(
+                        "no se pudo inicializar EnglishPhonemizer (¿falta CMUDict?): {e}"
+                    ))
+                }),
         }
     }
 
@@ -311,8 +313,7 @@ mod tests {
     #[test]
     fn phonemize_spanish_simple_text() {
         let cache = PhonemizerCache::new();
-        let tokens = phonemize_with_cache(&cache, Language::Es, "hola")
-            .expect("phonemize hola");
+        let tokens = phonemize_with_cache(&cache, Language::Es, "hola").expect("phonemize hola");
         // "hola" debe producir al menos un fonema (no vacío).
         assert!(
             !tokens.is_empty(),

@@ -222,7 +222,7 @@ impl Injector for RecordingInjector {
 fn load_audio_bin(path: &std::path::Path) -> Vec<f32> {
     let bytes = std::fs::read(path).expect("no se pudo leer audio_16k.bin");
     assert!(
-        bytes.len() % 4 == 0,
+        bytes.len().is_multiple_of(4),
         "audio_16k.bin debe tener tamaño múltiplo de 4"
     );
     let count = bytes.len() / 4;

@@ -99,23 +99,14 @@ impl PiperVoiceConfig {
     /// críticos (`audio`, `phoneme_id_map`).
     pub fn load(path: &Path) -> Result<Self, TtsError> {
         let bytes = fs::read(path).map_err(|e| {
-            TtsError::InvalidVoiceConfig(format!(
-                "no se pudo leer '{}': {e}",
-                path.display()
-            ))
+            TtsError::InvalidVoiceConfig(format!("no se pudo leer '{}': {e}", path.display()))
         })?;
         let raw: RawPiperVoiceConfig = serde_json::from_slice(&bytes).map_err(|e| {
-            TtsError::InvalidVoiceConfig(format!(
-                "JSON inválido en '{}': {e}",
-                path.display()
-            ))
+            TtsError::InvalidVoiceConfig(format!("JSON inválido en '{}': {e}", path.display()))
         })?;
         Self::from_raw(raw).map_err(|e| {
             // Envolvemos en InvalidVoiceConfig con contexto del path.
-            TtsError::InvalidVoiceConfig(format!(
-                "config '{}' inválida: {e}",
-                path.display()
-            ))
+            TtsError::InvalidVoiceConfig(format!("config '{}' inválida: {e}", path.display()))
         })
     }
 
@@ -123,15 +114,15 @@ impl PiperVoiceConfig {
     /// robusta con defaults aplicados. Punto único donde decidimos qué
     /// hacer cuando un campo opcional falta.
     fn from_raw(raw: RawPiperVoiceConfig) -> Result<Self, String> {
-        let audio = raw.audio.ok_or_else(|| {
-            "campo obligatorio 'audio' ausente".to_string()
-        })?;
+        let audio = raw
+            .audio
+            .ok_or_else(|| "campo obligatorio 'audio' ausente".to_string())?;
         if audio.sample_rate == 0 {
             return Err("audio.sample_rate debe ser > 0".into());
         }
-        let phoneme_id_map = raw.phoneme_id_map.ok_or_else(|| {
-            "campo obligatorio 'phoneme_id_map' ausente".to_string()
-        })?;
+        let phoneme_id_map = raw
+            .phoneme_id_map
+            .ok_or_else(|| "campo obligatorio 'phoneme_id_map' ausente".to_string())?;
 
         let inference = raw.inference.unwrap_or_default();
         Ok(Self {
@@ -333,8 +324,7 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_error() {
-        let err = PiperVoiceConfig::load(Path::new("/nonexistent.json"))
-            .unwrap_err();
+        let err = PiperVoiceConfig::load(Path::new("/nonexistent.json")).unwrap_err();
         match err {
             TtsError::InvalidVoiceConfig(_) => (),
             other => panic!("esperaba InvalidVoiceConfig, obtuve: {other:?}"),

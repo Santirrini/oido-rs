@@ -29,7 +29,10 @@ impl AudioChunk {
     #[must_use]
     pub fn silence(duration_ms: u32, sample_rate_hz: u32) -> Self {
         let n = (sample_rate_hz as usize * duration_ms as usize) / 1000;
-        Self { samples: vec![0.0; n], sample_rate_hz }
+        Self {
+            samples: vec![0.0; n],
+            sample_rate_hz,
+        }
     }
 }
 

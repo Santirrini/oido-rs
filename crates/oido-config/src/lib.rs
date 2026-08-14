@@ -103,9 +103,9 @@ fn default_system_prompt() -> String {
 /// de `oido-tts`.
 ///
 /// - `Kokoro`: 82 M params (Apache-2.0). CPU friendly. EN/UK/JA/ZH/ES/FR/HI/IT/PT.
-//// Sólo sintetiza de forma robusta en **inglés** en la v1.0 del TTS
+///   Sólo sintetiza de forma robusta en **inglés** en la v1.0 del TTS
 ///   (porque `misaki-rs` no tiene G2P de español sin espeak-ng = GPL).
-//// El bin enrutará texto español automáticamente a Piper cuando el
+///   El bin enrutará texto español automáticamente a Piper cuando el
 ///   engine seleccionado sea `Kokoro`.
 /// - `Piper`: VITS neural. Soporta ES/EN/PT/FR/ZH/JA/KO/SV vía
 ///   `piper-plus-g2p` (MIT, sin GPL).
@@ -197,7 +197,6 @@ impl Default for TtsConfig {
         }
     }
 }
-
 
 ///
 /// whisper.cpp no expone un único parámetro `effort` como la OpenAI API.
@@ -373,26 +372,26 @@ fn default_n_threads() -> Option<u16> {
     None
 }
 
-        impl Default for Config {
-            fn default() -> Self {
-                Self {
-                    hotkey: "F8".into(),
-                    model: "ggml-base.bin".into(),
-                    language_ui: "es".into(),
-                    use_gpu: default_use_gpu(),
-                    n_threads: None,
-                    theme: default_theme(),
-                    stt_mode: default_stt_mode(),
-                    ui_language: default_ui_language(),
-                    prompt_preset: default_prompt_preset(),
-                    system_prompt: default_system_prompt(),
-                    effort: default_effort_preset(),
-                    input_device: default_input_device(),
-                    update: UpdateConfig::default(),
-                    tts: TtsConfig::default(),
-                }
-            }
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            hotkey: "F8".into(),
+            model: "ggml-base.bin".into(),
+            language_ui: "es".into(),
+            use_gpu: default_use_gpu(),
+            n_threads: None,
+            theme: default_theme(),
+            stt_mode: default_stt_mode(),
+            ui_language: default_ui_language(),
+            prompt_preset: default_prompt_preset(),
+            system_prompt: default_system_prompt(),
+            effort: default_effort_preset(),
+            input_device: default_input_device(),
+            update: UpdateConfig::default(),
+            tts: TtsConfig::default(),
         }
+    }
+}
 
 /// Path canónico al directorio de configuración del usuario para Oido.
 pub fn config_dir() -> PathBuf {
@@ -825,8 +824,10 @@ mod tests {
     /// que el usuario pueda editarlo a mano en `config.json`.
     #[test]
     fn input_device_roundtrips_some_and_none() {
-        let mut cfg = Config::default();
-        cfg.input_device = Some("USB Microphone".into());
+        let mut cfg = Config {
+            input_device: Some("USB Microphone".into()),
+            ..Config::default()
+        };
         let bytes = serde_json::to_vec(&cfg).unwrap();
         let back: Config = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.input_device, Some("USB Microphone".into()));

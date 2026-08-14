@@ -109,11 +109,11 @@ pub fn is_filtered(text: &str) -> bool {
 ///    1. Aparece al menos `REPETITION_MIN_COUNT` veces en total.
 ///    2. Cubre al menos `REPETITION_COVERAGE_NUMERATOR /
 ///       REPETITION_COVERAGE_DENOMINATOR` del texto total (en palabras).
-///    "Cubrir" significa: `unit.len() * unit_count` palabras del texto
-///    están dentro de repeticiones de esa unidad. Equivale a "la
-///    unidad repetida ocupa al menos la mitad del texto", pero se
-///    evalúa por longitud ya cubierta en lugar de ratio sobre
-///    `words.len()` para no desfavorecer n-gramas largos.
+///       "Cubrir" significa: `unit.len() * unit_count` palabras del texto
+///       están dentro de repeticiones de esa unidad. Equivale a "la
+///       unidad repetida ocupa al menos la mitad del texto", pero se
+///       evalúa por longitud ya cubierta en lugar de ratio sobre
+///       `words.len()` para no desfavorecer n-gramas largos.
 #[must_use]
 pub fn is_repetition_loop(text: &str) -> bool {
     is_repetition_loop_inner(text, false)
@@ -164,10 +164,12 @@ fn is_repetition_loop_inner(text: &str, strong_signal: bool) -> bool {
     if words.len() <= SHORT_LOOP_MAX_WORDS {
         let normalized_words: Vec<String> = words
             .iter()
-            .map(|w| w.trim_end_matches(|c: char| c.is_ascii_punctuation()).to_string())
+            .map(|w| {
+                w.trim_end_matches(|c: char| c.is_ascii_punctuation())
+                    .to_string()
+            })
             .collect();
-        let normalized_refs: Vec<&str> =
-            normalized_words.iter().map(String::as_str).collect();
+        let normalized_refs: Vec<&str> = normalized_words.iter().map(String::as_str).collect();
         let (_, unit_count) = most_frequent_ngram(&normalized_refs, 1);
         let signal_boost: usize = if strong_signal { 2 } else { 0 };
         let min_count = if words.len() <= 3 {
@@ -257,9 +259,7 @@ pub fn filter(text: &str) -> Option<&str> {
 /// repetition guard cuando el audio tiene habla real.
 #[must_use]
 pub fn filter_with_signal<'a>(text: &'a str, stats: Option<&AudioStats>) -> Option<&'a str> {
-    if is_filtered(text)
-        || is_repetition_loop_with_signal(text, stats)
-        || is_likely_artifact(text)
+    if is_filtered(text) || is_repetition_loop_with_signal(text, stats) || is_likely_artifact(text)
     {
         None
     } else {

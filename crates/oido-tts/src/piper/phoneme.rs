@@ -74,14 +74,12 @@ impl SpecialIds {
     /// - `_` (PAD) es opcional: si falta usamos `0` (el default que usa
     ///   el port `piper-rs` cuando el modelo no lo trae).
     pub fn from_map(map: &HashMap<String, Vec<i64>>) -> Result<Self, TtsError> {
-        let bos = first_id(map, "^")
-            .ok_or_else(|| TtsError::InvalidVoiceConfig(
-                "phoneme_id_map no contiene '^' (BOS)".into(),
-            ))?;
-        let eos = first_id(map, "$")
-            .ok_or_else(|| TtsError::InvalidVoiceConfig(
-                "phoneme_id_map no contiene '$' (EOS)".into(),
-            ))?;
+        let bos = first_id(map, "^").ok_or_else(|| {
+            TtsError::InvalidVoiceConfig("phoneme_id_map no contiene '^' (BOS)".into())
+        })?;
+        let eos = first_id(map, "$").ok_or_else(|| {
+            TtsError::InvalidVoiceConfig("phoneme_id_map no contiene '$' (EOS)".into())
+        })?;
         let pad = first_id(map, "_").unwrap_or(0);
         Ok(Self { bos, pad, eos })
     }
@@ -243,7 +241,18 @@ mod tests {
         let (ids, _) = encode(&tokens, &m, specials);
         // Esperado: [BOS, PAD, a(10), PAD, k(30), PAD, EOS]
         // (PAD tras BOS es convención del upstream.)
-        assert_eq!(ids, vec![specials.bos, specials.pad, 10, specials.pad, 30, specials.pad, specials.eos]);
+        assert_eq!(
+            ids,
+            vec![
+                specials.bos,
+                specials.pad,
+                10,
+                specials.pad,
+                30,
+                specials.pad,
+                specials.eos
+            ]
+        );
     }
 
     #[test]
@@ -253,7 +262,10 @@ mod tests {
         let tokens = vec!["a".to_string(), "Z".to_string(), "k".to_string()];
         let (ids, report) = encode(&tokens, &m, specials);
         assert_eq!(report.skipped, 1);
-        assert!(!ids.contains(&99), "el token desconocido 'Z' no debe colarse como 99");
+        assert!(
+            !ids.contains(&99),
+            "el token desconocido 'Z' no debe colarse como 99"
+        );
         assert!(ids.contains(&10));
         assert!(ids.contains(&30));
     }

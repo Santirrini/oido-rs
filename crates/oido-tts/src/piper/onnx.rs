@@ -152,9 +152,9 @@ impl PiperSession {
         // Lock + run. ort::Session::run requiere `&mut self`; el lock
         // nos da acceso exclusivo aunque el trait method sea `&self`.
         let mut guard = self.inner.lock();
-        let session = guard.as_mut().ok_or_else(|| {
-            TtsError::Backend("PiperSession::infer con sesión no cargada".into())
-        })?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| TtsError::Backend("PiperSession::infer con sesión no cargada".into()))?;
         let outputs = session
             .run(ort::inputs! {
                 "input" => input,
@@ -257,9 +257,7 @@ mod tests {
         let err = PiperSession::load(&bogus).unwrap_err();
         match err {
             TtsError::ModelNotFound(_) => (),
-            other => panic!(
-                "esperaba ModelNotFound para .onnx inexistente, obtuve: {other:?}"
-            ),
+            other => panic!("esperaba ModelNotFound para .onnx inexistente, obtuve: {other:?}"),
         }
     }
 }

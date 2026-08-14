@@ -210,14 +210,10 @@ fn drain_with_unavailable(rx: &Receiver<Job>) {
     while let Ok(job) = rx.recv() {
         match job {
             Job::Inject { reply, .. } => {
-                let _ = reply.send(Err(InjectError::Unsupported(
-                    "UIA no inicializado".into(),
-                )));
+                let _ = reply.send(Err(InjectError::Unsupported("UIA no inicializado".into())));
             }
             Job::ReadSelection { reply } => {
-                let _ = reply.send(Err(InjectError::Unsupported(
-                    "UIA no inicializado".into(),
-                )));
+                let _ = reply.send(Err(InjectError::Unsupported("UIA no inicializado".into())));
             }
         }
     }

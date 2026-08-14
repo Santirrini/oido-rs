@@ -84,7 +84,10 @@ impl Platform {
 impl std::fmt::Debug for SelectionReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SelectionReader")
-            .field("direct", &self.direct.as_ref().map(|d| d as &dyn std::fmt::Debug))
+            .field(
+                "direct",
+                &self.direct.as_ref().map(|d| d as &dyn std::fmt::Debug),
+            )
             .field("platform", &self.platform)
             .finish()
     }
@@ -106,9 +109,7 @@ impl SelectionReader {
     /// Variante conveniente que detecta la plataforma del bin.
     /// Llamar en `main()` (donde el target está disponible).
     #[must_use]
-    pub fn with_current_platform(
-        direct: Option<Arc<dyn DirectInjector>>,
-    ) -> Self {
+    pub fn with_current_platform(direct: Option<Arc<dyn DirectInjector>>) -> Self {
         Self::new(direct, Platform::current())
     }
 
@@ -152,9 +153,8 @@ impl SelectionReader {
         // Lazy-init del clipboard (puede fallar si el SO no provee uno,
         // e.g. Linux sin X11).
         if self.clipboard.is_none() {
-            let c = Clipboard::new().map_err(|e| {
-                InjectError::Unsupported(format!("clipboard init: {e}"))
-            })?;
+            let c = Clipboard::new()
+                .map_err(|e| InjectError::Unsupported(format!("clipboard init: {e}")))?;
             self.clipboard = Some(c);
         }
         let clipboard = self.clipboard.as_mut().expect("just initialized");
@@ -167,16 +167,15 @@ impl SelectionReader {
         // Importante: `Enigo::new` necesita configuración de plataforma
         // (especialmente macOS). `Settings::default()` elige el backend
         // correcto.
-        send_copy_shortcut(self.platform).map_err(|e| {
-            InjectError::Unsupported(format!("send_copy_shortcut: {e}"))
-        })?;
+        send_copy_shortcut(self.platform)
+            .map_err(|e| InjectError::Unsupported(format!("send_copy_shortcut: {e}")))?;
 
         // c) Lee clipboard nuevo. Si falla o devuelve vacío, no hay
         // selección textual (puede ser imagen, archivo, control sin
         // selección, etc.).
-        let result_text = clipboard.get_text().map_err(|e| {
-            InjectError::Unsupported(format!("clipboard get_text: {e}"))
-        })?;
+        let result_text = clipboard
+            .get_text()
+            .map_err(|e| InjectError::Unsupported(format!("clipboard get_text: {e}")))?;
 
         // d) Restaurar. Si el guardado no era texto, se omite la
         // restauración para evitar pisar el clipboard con tipos
@@ -201,8 +200,7 @@ impl SelectionReader {
 /// limpio y facilita cambiar la impl en tests).
 fn send_copy_shortcut(platform: Platform) -> Result<(), String> {
     let modifier = platform.copy_modifier();
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("enigo init: {e}"))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("enigo init: {e}"))?;
 
     enigo
         .key(modifier, Direction::Press)
@@ -258,7 +256,11 @@ mod tests {
         let mut reader = SelectionReader::new(Some(direct.clone()), Platform::Windows);
         let got = reader.read().expect("read_selection Ok debe propagarse");
         assert_eq!(got, "hola mundo");
-        assert_eq!(*direct.calls.lock().unwrap(), 1, "debe intentar 1 vez el direct");
+        assert_eq!(
+            *direct.calls.lock().unwrap(),
+            1,
+            "debe intentar 1 vez el direct"
+        );
     }
 
     /// Con direct devolviendo error: el reader debe intentar el fallback
