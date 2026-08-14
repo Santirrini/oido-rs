@@ -29,9 +29,10 @@ use tracing::{info, info_span, warn};
 pub mod tts_models;
 
 pub use tts_models::{
-    download_kokoro_voice, download_piper_voice, download_tts_asset, find_tts,
-    is_kokoro_installed, is_piper_voice_installed, is_tts_installed, list_tts_installed,
+    download_kokoro_voice, download_piper_voice, download_tts_asset, find_tts, is_kokoro_installed,
+    is_piper_voice_installed, is_tts_installed, list_tts_installed,
     sha256_of_file as tts_sha256_of, tts_catalog, TtsAsset, TtsAssetError, TtsAssetKind,
+    TtsVoiceInfo, KOKORO_VOICES, PIPER_VOICE_DISPLAY,
 };
 
 /// Familia del modelo (define el submenú y el orden de presentación).

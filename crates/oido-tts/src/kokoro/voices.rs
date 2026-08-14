@@ -96,9 +96,8 @@ impl VoiceBank {
         let file = File::open(path).map_err(|e| {
             TtsError::Backend(format!("abrir voices-v1.0.bin ({}): {e}", path.display()))
         })?;
-        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| {
-            TtsError::Backend(format!("parse NPZ ({}): {e}", path.display()))
-        })?;
+        let mut archive = ZipArchive::new(BufReader::new(file))
+            .map_err(|e| TtsError::Backend(format!("parse NPZ ({}): {e}", path.display())))?;
 
         let mut bank: BTreeMap<String, Vec<Vec<f32>>> = BTreeMap::new();
 
@@ -165,9 +164,24 @@ impl VoiceBank {
     /// caller pueda moverlo a su `Tensor::from_array` sin
     /// restricciones de lifetime.
     pub fn voice_slice(&self, voice_id: &str, token_count: usize) -> Result<Array1<f32>, TtsError> {
-        let rows = self.inner.get(voice_id).ok_or_else(|| {
-            TtsError::UnknownVoice(voice_id.to_string())
-        })?;
+        let rows = match self.inner.get(voice_id) {
+            Some(r) => r,
+            None => {
+                let (fallback_name, fallback_rows) = self
+                    .inner
+                    .get_key_value("ef_dora")
+                    .or_else(|| self.inner.get_key_value("af_heart"))
+                    .or_else(|| self.inner.iter().next())
+                    .ok_or_else(|| TtsError::UnknownVoice(voice_id.to_string()))?;
+
+                tracing::warn!(
+                    requested_voice = %voice_id,
+                    fallback_voice = %fallback_name,
+                    "voz Kokoro no encontrada en el banco; utilizando voz de fallback"
+                );
+                fallback_rows
+            }
+        };
         if rows.is_empty() {
             return Err(TtsError::InvalidVoiceConfig(format!(
                 "voz '{voice_id}' tiene tabla de estilos vacía"
@@ -197,9 +211,7 @@ impl VoiceBank {
 fn parse_npy_float32_2d(buf: &[u8], expected_cols: usize) -> Result<Vec<Vec<f32>>, TtsError> {
     // Magic: 6 bytes `\x93NUMPY`
     if buf.len() < 10 || &buf[..6] != b"\x93NUMPY" {
-        return Err(TtsError::Backend(
-            "NPY: magic header ausente".into(),
-        ));
+        return Err(TtsError::Backend("NPY: magic header ausente".into()));
     }
     let major = buf[6];
     let minor = buf[7];
@@ -221,7 +233,9 @@ fn parse_npy_float32_2d(buf: &[u8], expected_cols: usize) -> Result<Vec<Vec<f32>
         .checked_add(header_len)
         .ok_or_else(|| TtsError::Backend("NPY: header_len overflow".into()))?;
     if header_end > buf.len() {
-        return Err(TtsError::Backend("NPY: header_len excede el archivo".into()));
+        return Err(TtsError::Backend(
+            "NPY: header_len excede el archivo".into(),
+        ));
     }
     let header_str = std::str::from_utf8(&buf[header_off..header_end])
         .map_err(|e| TtsError::Backend(format!("NPY: header no UTF-8: {e}")))?;
@@ -248,12 +262,16 @@ fn parse_npy_float32_2d(buf: &[u8], expected_cols: usize) -> Result<Vec<Vec<f32>
     let shape_str = header_field_str(header_str, "shape")
         .ok_or_else(|| TtsError::Backend("NPY: falta 'shape'".into()))?;
     let dims = parse_shape_tuple(&shape_str)?;
-    if dims.len() != 2 {
-        return Err(TtsError::Backend(format!(
-            "NPY: shape debe ser 2D, obtuve {dims:?}"
-        )));
-    }
-    let (rows, cols) = (dims[0], dims[1]);
+    let (rows, cols) = match dims.as_slice() {
+        [rows, cols] => (*rows, *cols),
+        [rows, 1, cols] => (*rows, *cols),
+        [1, rows, cols] => (*rows, *cols),
+        _ => {
+            return Err(TtsError::Backend(format!(
+                "NPY: shape debe ser 2D o 3D con dimensión singleton, obtuve {dims:?}"
+            )));
+        }
+    };
     if cols != expected_cols {
         return Err(TtsError::InvalidVoiceConfig(format!(
             "NPY: dimensión de estilo {cols} != {expected_cols} — \
@@ -346,8 +364,7 @@ fn header_field_str(header: &str, key: &str) -> Option<String> {
     // comillas simples: `'descr': '<f4'`). Sin esto, el caller
     // compararía con `"<f4"` cuando el valor real es `"'<f4'"`.
     if (value.starts_with('\'') && value.ends_with('\''))
-        || (value.starts_with('"') && value.ends_with('"'))
-        && value.len() >= 2
+        || (value.starts_with('"') && value.ends_with('"')) && value.len() >= 2
     {
         value = value[1..value.len() - 1].to_string();
     }
@@ -413,7 +430,10 @@ mod tests {
     fn header_field_str_extracts_descr() {
         let h = "{'descr': '<f4', 'fortran_order': False, 'shape': (511, 256), }";
         assert_eq!(header_field_str(h, "descr").as_deref(), Some("<f4"));
-        assert_eq!(header_field_str(h, "fortran_order").as_deref(), Some("False"));
+        assert_eq!(
+            header_field_str(h, "fortran_order").as_deref(),
+            Some("False")
+        );
         assert_eq!(header_field_str(h, "shape").as_deref(), Some("(511, 256)"));
         assert_eq!(header_field_str(h, "missing"), None);
     }
@@ -424,8 +444,7 @@ mod tests {
     #[test]
     fn parse_npy_float32_2d_round_trips_synthetic_buffer() {
         // Construimos el header NPY v1.
-        let header_dict =
-            "{'descr': '<f4', 'fortran_order': False, 'shape': (3, 2), }";
+        let header_dict = "{'descr': '<f4', 'fortran_order': False, 'shape': (3, 2), }";
         // NPY v1: header_len u16 + header padded a múltiplo de 64 con
         // espacios + 1 byte newline.
         let mut header_bytes = header_dict.as_bytes().to_vec();
@@ -496,5 +515,32 @@ mod tests {
         buf.extend_from_slice(&[0u8; 2 * 128 * 4]);
         let res = parse_npy_float32_2d(&buf, 256);
         assert!(matches!(res, Err(TtsError::InvalidVoiceConfig(_))));
+    }
+
+    /// `parse_npy_float32_2d` soporta shapes 3D con dimensión singleton como (3, 1, 2).
+    #[test]
+    fn parse_npy_float32_2d_supports_3d_singleton_shape() {
+        let header_dict = "{'descr': '<f4', 'fortran_order': False, 'shape': (3, 1, 2), }";
+        let mut header_bytes = header_dict.as_bytes().to_vec();
+        while !(header_bytes.len() + 10 + 1).is_multiple_of(64) {
+            header_bytes.push(b' ');
+        }
+        header_bytes.push(b'\n');
+        let header_len = header_bytes.len() as u16;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"\x93NUMPY");
+        buf.push(1);
+        buf.push(0);
+        buf.extend_from_slice(&header_len.to_le_bytes());
+        buf.extend_from_slice(&header_bytes);
+        for v in [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let rows = parse_npy_float32_2d(&buf, 2).expect("parse 3D singleton");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], vec![0.0, 1.0]);
+        assert_eq!(rows[1], vec![2.0, 3.0]);
+        assert_eq!(rows[2], vec![4.0, 5.0]);
     }
 }

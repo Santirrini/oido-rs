@@ -76,17 +76,9 @@ pub use onnx::PiperSession;
 /// `models_dir / "<id>.onnx"` y `models_dir / "<id>.onnx.json"`.
 const PIPER_VOICES: &[(&str, &str, &str)] = &[
     // (id, display_name, language_bcp47)
-    (
-        "es_ES-davefx-medium",
-        "Davefx (es-ES, medium)",
-        "es-ES",
-    ),
+    ("es_ES-davefx-medium", "Davefx (es-ES, medium)", "es-ES"),
     ("es_MX-ald-medium", "Ald (es-MX, medium)", "es-MX"),
-    (
-        "en_US-lessac-medium",
-        "Lessac (en-US, medium)",
-        "en-US",
-    ),
+    ("en_US-lessac-medium", "Lessac (en-US, medium)", "en-US"),
 ];
 
 /// Backend TTS Piper (VITS).
@@ -163,10 +155,7 @@ impl PiperEngine {
             return Some(lang);
         }
         // Fallback: primer segmento antes de '-' / '_'.
-        let first = voice_id
-            .split(['-', '_'])
-            .next()
-            .unwrap_or(voice_id);
+        let first = voice_id.split(['-', '_']).next().unwrap_or(voice_id);
         PiperLanguage::from_code(first)
     }
 
@@ -222,9 +211,9 @@ impl Engine for PiperEngine {
         // 1. Guard: sesión cargada. Sin esto `infer` entra en pánico
         //    al desreferenciar `Option<Session>`.
         let session_guard = self.session.lock();
-        let session = session_guard.as_ref().ok_or_else(|| {
-            TtsError::Backend("modelo no cargado".to_string())
-        })?;
+        let session = session_guard
+            .as_ref()
+            .ok_or_else(|| TtsError::Backend("modelo no cargado".to_string()))?;
 
         // 2. Validación de entrada.
         let trimmed = text.trim();
@@ -254,11 +243,7 @@ impl Engine for PiperEngine {
 
         // 5. Codificar fonemas → IDs con BOS/PAD/EOS.
         let special_ids = phoneme::SpecialIds::from_map(&session.config().phoneme_id_map)?;
-        let (ids, report) = phoneme::encode(
-            &tokens,
-            &session.config().phoneme_id_map,
-            special_ids,
-        );
+        let (ids, report) = phoneme::encode(&tokens, &session.config().phoneme_id_map, special_ids);
         if report.truncated {
             tracing::warn!(
                 voice = %self.voice_id,
@@ -277,8 +262,8 @@ impl Engine for PiperEngine {
         }
 
         // 6. Inferencia ONNX.
-        let length_scale = Self::length_scale_from_speed(self.speed_milli)
-            * session.config().length_scale;
+        let length_scale =
+            Self::length_scale_from_speed(self.speed_milli) * session.config().length_scale;
         let samples = session.infer(
             &ids,
             session.config().noise_scale,
@@ -314,7 +299,10 @@ impl Engine for PiperEngine {
     }
 
     fn is_loaded(&self) -> bool {
-        self.session.lock().as_ref().is_some_and(PiperSession::is_loaded)
+        self.session
+            .lock()
+            .as_ref()
+            .is_some_and(PiperSession::is_loaded)
     }
 
     fn warm_up(&self) -> Result<(), TtsError> {
@@ -362,6 +350,11 @@ impl Engine for PiperEngine {
 
     fn engine_kind(&self) -> TtsEngineKind {
         TtsEngineKind::Piper
+    }
+
+    fn set_voice(&mut self, voice: &str) {
+        self.voice_id = voice.to_string();
+        self.g2p_lang = Self::infer_lang_from_voice_id(&self.voice_id);
     }
 }
 
@@ -414,12 +407,10 @@ mod tests {
                     "mensaje debería mencionar 'no cargado', obtuve: {msg}"
                 );
             }
-            Err(other) => panic!(
-                "esperaba TtsError::Backend(\"modelo no cargado\"), obtuve: {other:?}"
-            ),
-            Ok(_) => panic!(
-                "synthesize sin modelo cargado NO debe devolver Ok"
-            ),
+            Err(other) => {
+                panic!("esperaba TtsError::Backend(\"modelo no cargado\"), obtuve: {other:?}")
+            }
+            Ok(_) => panic!("synthesize sin modelo cargado NO debe devolver Ok"),
         }
     }
 
@@ -470,17 +461,11 @@ mod tests {
     #[test]
     fn piper_speed_mapping_roundtrip() {
         // 1.0x (default) → length_scale 1.0
-        assert!(
-            (PiperEngine::length_scale_from_speed(1000) - 1.0).abs() < f32::EPSILON
-        );
+        assert!((PiperEngine::length_scale_from_speed(1000) - 1.0).abs() < f32::EPSILON);
         // 2.0x → length_scale 0.5
-        assert!(
-            (PiperEngine::length_scale_from_speed(2000) - 0.5).abs() < f32::EPSILON
-        );
+        assert!((PiperEngine::length_scale_from_speed(2000) - 0.5).abs() < f32::EPSILON);
         // 0.5x → length_scale 2.0
-        assert!(
-            (PiperEngine::length_scale_from_speed(500) - 2.0).abs() < f32::EPSILON
-        );
+        assert!((PiperEngine::length_scale_from_speed(500) - 2.0).abs() < f32::EPSILON);
 
         // Edge case: speed=0 satura a 1 para evitar length_scale=∞.
         assert!(
@@ -523,5 +508,32 @@ mod tests {
     fn piper_warm_up_without_model_is_ok() {
         let engine = PiperEngine::new("es_ES-davefx-medium");
         assert!(engine.warm_up().is_ok());
+    }
+
+    /// `set_voice` (método del trait `Engine`) actualiza el `voice_id`
+    /// Y el `g2p_lang` derivado en caliente. Verificamos el `g2p_lang`
+    /// a través del `Debug` impl (que lo expone como campo), ya que no
+    /// hay getter público. Garantiza que un cambio ES→EN reenrute el
+    /// G2P sin recargar el `.onnx`.
+    #[test]
+    fn piper_set_voice_updates_lang() {
+        let mut engine = PiperEngine::new("es_ES-davefx-medium");
+        // Estado inicial: idioma ES.
+        let dbg_before = format!("{engine:?}");
+        assert!(
+            dbg_before.contains("g2p_lang") && dbg_before.contains("Es"),
+            "debug inicial debe mostrar g2p_lang=Es: {dbg_before}"
+        );
+        // Cambio en caliente a una voz EN.
+        engine.set_voice("en_US-lessac-medium");
+        let dbg_after = format!("{engine:?}");
+        assert!(
+            dbg_after.contains("voice_id") && dbg_after.contains("en_US-lessac-medium"),
+            "voice_id no se actualizó: {dbg_after}"
+        );
+        assert!(
+            dbg_after.contains("g2p_lang") && dbg_after.contains("En"),
+            "g2p_lang no pasó a En tras set_voice: {dbg_after}"
+        );
     }
 }

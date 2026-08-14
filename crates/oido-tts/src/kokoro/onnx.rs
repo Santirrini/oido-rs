@@ -2,15 +2,22 @@
 //!
 //! ## Contrato del grafo (verificado)
 //!
-//! El `kokoro-v1.0.onnx` distribuido por `thewh1teagle/kokoro-onnx`
-//! tiene 3 inputs y 1 output fijos:
+//! El `kokoro-82m-v1.0.onnx` distribuido por
+//! `onnx-community/Kokoro-82M-v1.0-ONNX` (el que el catálogo de
+//! `oido-models` descarga) tiene 3 inputs y 1 output fijos:
 //!
-//! | Nombre   | Tipo   | Shape         | Significado                                  |
-//! |----------|--------|---------------|----------------------------------------------|
-//! | `tokens` | `i64`  | `[1, seq_len]`| IDs de fonemas **con** el pad 0 al inicio/fin |
-//! | `style`  | `f32`  | `[1, 256]`    | Vector de estilo 1D seleccionado por voz+L   |
-//! | `speed`  | `f32`  | `[1]`         | Escalar: multiplicador de velocidad (1.0x = 1000 milli) |
+//! | Nombre      | Tipo   | Shape         | Significado                                  |
+//! |-------------|--------|---------------|----------------------------------------------|
+//! | `input_ids` | `i64`  | `[1, seq_len]`| IDs de fonemas **con** el pad 0 al inicio/fin |
+//! | `style`     | `f32`  | `[1, 256]`    | Vector de estilo 1D seleccionado por voz+L   |
+//! | `speed`     | `f32`  | `[1]`         | Escalar: multiplicador de velocidad (1.0x = 1000 milli) |
 //! | **output[0]** `audio` | `f32` | `[1, n_samples]` | Audio PCM mono @ 24 kHz                  |
+//!
+//! NOTA: el input de fonemas se llama **`input_ids`** en este export
+//! (convención `onnx-community/transformers`). La variante de
+//! `thewh1teagle/kokoro-onnx` usa `"tokens"`, pero NO es la que el
+//! catálogo descarga — usar ese nombre provoca
+//! `Invalid input name: tokens` en cada `session.run`.
 //!
 //! ## Padding
 //!
@@ -125,10 +132,7 @@ impl KokoroSession {
             .map_err(|e| TtsError::Backend(format!("commit_from_file: {e}")))?;
         *self.inner.lock() = Some(session);
         self.model_path = model_path.to_path_buf();
-        tracing::info!(
-            ?model_path,
-            "KokoroSession::load completada"
-        );
+        tracing::info!(?model_path, "KokoroSession::load completada");
         Ok(())
     }
 
@@ -205,9 +209,9 @@ impl KokoroSession {
         // (`voice = voice[len(tokens)]`).
         let style_vec: Array1<f32> = {
             let bank_guard = self.voices.lock();
-            let bank = bank_guard.as_ref().ok_or_else(|| {
-                TtsError::Backend("banco de voces no cargado".into())
-            })?;
+            let bank = bank_guard
+                .as_ref()
+                .ok_or_else(|| TtsError::Backend("banco de voces no cargado".into()))?;
             bank.voice_slice(voice_id, n_keep)?
         };
         // `voice_slice` ya devuelve los 256 floats en orden C
@@ -231,7 +235,7 @@ impl KokoroSession {
         })?;
         let outputs = session
             .run(ort::inputs! {
-                "tokens" => tokens_tensor,
+                "input_ids" => tokens_tensor,
                 "style" => style_tensor,
                 "speed" => speed_tensor,
             })

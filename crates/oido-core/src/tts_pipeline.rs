@@ -174,9 +174,8 @@ fn run_tts_worker(
         // que devolverá un error en su `synthesize` si no puede
         // phonemizar.
         if engine_kind == TtsEngineKind::Kokoro && looks_spanish(&text) {
-            warn!(
-                "Kokoro recibió texto español. ¿Corregir el enrutado en el bin? \
-                 Texto: {} chars",
+            tracing::info!(
+                "Kokoro sintetizando texto en español: {} chars",
                 text.chars().count()
             );
         }
@@ -184,7 +183,7 @@ fn run_tts_worker(
         // Chunking por oración + sub-chunking por longitud (para que
         // ningún chunk exceda MAX_PHONEMES del engine Piper/Kokoro).
         let mut chunker = SentenceChunker::new(&text);
-        while let Some(chunk) = chunker.next() {
+        for chunk in chunker.by_ref() {
             // Checkpoint de cancelación entre chunks.
             if cancel.load(Ordering::SeqCst) {
                 warn!("lectura cancelada por nueva selección");
@@ -495,7 +494,7 @@ mod tests {
         let text = "a".repeat(500);
         let mut chunker = SentenceChunker::new(&text);
         let mut chunks = Vec::new();
-        while let Some(c) = chunker.next() {
+        for c in chunker.by_ref() {
             chunks.push(c);
         }
         assert!(chunks.len() >= 2, "oración de 500 chars debe subdividirse");
@@ -531,9 +530,7 @@ mod tests {
         let chunks = subdivide_long_sentence(&s, MAX_CHUNK_CHARS);
         assert!(chunks.len() >= 2, "oración larga debe subdividirse");
         // Al menos un chunk debe terminar en coma (preferencia por corte natural).
-        let any_comma_terminated = chunks
-            .iter()
-            .any(|c| c.trim_end().ends_with(','));
+        let any_comma_terminated = chunks.iter().any(|c| c.trim_end().ends_with(','));
         assert!(
             any_comma_terminated,
             "al menos un chunk debe cortar en coma: {:?}",

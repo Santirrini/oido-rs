@@ -106,6 +106,19 @@ pub enum MenuAction {
     /// Click sobre un item del submenú "Velocidad". El valor es el
     /// multiplicador en millis (500, 750, 1000, 1250, 1500, 2000).
     SetTtsSpeed(u16),
+    /// Click sobre un item del submenú "Voces TTS" (descarga/
+    /// activación). El `String` es el **voice_id** canónico:
+    /// - `"kokoro"` → bundle completo (kokoro-82m-v1.0.onnx + voices-v1.0.bin)
+    /// - `"es_ES-davefx-medium"` / `"es_MX-ald-medium"` / `"en_US-lessac-medium"`
+    ///   → voz Piper individual (descarga 2 archivos: .onnx + .onnx.json)
+    ///
+    /// El bin dispatch decide: si el asset está instalado → persistir
+    /// `tts.engine`/`tts.voice` + `RefreshMenu`; si no → spawn
+    /// `oido-tts-downloader` + `RefreshMenu` tras terminar.
+    ///
+    /// Espejo de `ModelItem(String)` para modelos STT: el patrón es
+    /// idéntico, sólo cambia el catálogo (`tts_catalog()` vs `catalog()`).
+    TtsModelItem(String),
     /// Click sobre un item del submenú "Leer selección ahora". El bin
     /// dispara `selection_reader.read()` y manda el texto al pipeline
     /// TTS actual.

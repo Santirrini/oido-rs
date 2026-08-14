@@ -9,6 +9,7 @@ use std::thread;
 use crossbeam_channel::Sender;
 #[allow(unused_imports)]
 use oido_config::ConfigStore;
+use oido_config::TtsEngineKind;
 use oido_stt::is_vad_model_filename;
 #[allow(unused_imports)]
 use oido_stt::SharedTranscriber;
@@ -223,6 +224,181 @@ pub(crate) fn whisper_fallback_filename(models_dir: &Path) -> Option<String> {
     }
     // Si ninguno estaba catalogado (no debería pasar), devolver el primero.
     installed.into_iter().next()
+}
+
+/// Maneja el click sobre un item del submenú "Voces TTS".
+///
+/// Espejo de [`handle_model_click`] para los assets TTS (`tts_catalog`).
+///
+/// `voice_id` puede ser:
+/// - Uno de los 28 IDs Kokoro (`af_heart`, `bm_george`, etc.). El
+///   bundle completo (`.onnx` + `voices-v1.0.bin`) se descarga como
+///   una sola unidad; clicar sobre cualquier voz Kokoro individual
+///   descarga el bundle y luego activa esa voz.
+/// - El id legacy `"kokoro"` (alias del bundle, mantenido por
+///   compatibilidad con snapshots viejos del menú).
+/// - Un basename Piper (`es_ES-davefx-medium`, etc.).
+///
+/// Si la voz/engine ya está instalado: persiste `tts.engine`/`tts.voice`
+/// y reconstruye el pipeline TTS (que carga el `.onnx` lazy).
+/// Si no está: lanza un thread `oido-tts-downloader` que descarga, y
+/// al terminar envía `RefreshMenu` para que aparezca el `✓`. Tras
+/// Kokoro, sí auto-activamos la voz clicada (porque el bundle se
+/// descargó por ella); tras Piper, sólo `RefreshMenu` (sin auto-activar).
+///
+/// Esta función es la única autorizada a modificar `tts.engine`/
+/// `tts.voice` desde la UI (regla R1: un solo path de mutación).
+pub(crate) fn handle_tts_model_click(
+    voice_id: &str,
+    control_tx: &crossbeam_channel::Sender<ControlMessage>,
+    cfg: &Arc<oido_config::ConfigStore>,
+) {
+    use oido_models::tts_models::{
+        download_kokoro_voice, download_piper_voice, is_kokoro_installed, is_piper_voice_installed,
+        KOKORO_VOICES,
+    };
+    let models_dir = resolve_models_dir();
+
+    // Detectamos si es Kokoro. El id legacy "kokoro" cuenta como Kokoro.
+    let is_kokoro_voice = voice_id == "kokoro" || KOKORO_VOICES.iter().any(|v| v.id == voice_id);
+
+    let installed = if is_kokoro_voice {
+        is_kokoro_installed(&models_dir)
+    } else {
+        is_piper_voice_installed(&models_dir, voice_id)
+    };
+
+    if installed {
+        // Ya está: actualizar la config al engine/voz pertinentes.
+        let mut snap = cfg.snapshot();
+        let mut changed = false;
+        if is_kokoro_voice {
+            // Para Kokoro, normalizamos el legacy "kokoro" a la voz
+            // explícita (o a "af_heart" si era el bundle legacy).
+            let target_voice = if voice_id == "kokoro" {
+                "af_heart"
+            } else {
+                voice_id
+            };
+            if snap.tts.engine != TtsEngineKind::Kokoro {
+                snap.tts.engine = TtsEngineKind::Kokoro;
+                changed = true;
+            }
+            if snap.tts.voice != target_voice {
+                snap.tts.voice = target_voice.to_string();
+                changed = true;
+            }
+        } else {
+            if snap.tts.engine != TtsEngineKind::Piper {
+                snap.tts.engine = TtsEngineKind::Piper;
+                changed = true;
+            }
+            if snap.tts.voice != voice_id {
+                snap.tts.voice = voice_id.to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            cfg.replace(snap.clone());
+            if let Err(e) = cfg.save() {
+                tracing::error!(?e, "no se pudo persistir tts.engine/voice");
+            }
+            tracing::info!(
+                voice = %voice_id,
+                engine = ?snap.tts.engine,
+                "TTS: voz activada"
+            );
+        }
+        // Sincronizar el runtime: propagar el cambio de voz al engine
+        // vivo. El handler decide entre `set_voice` barato (Kokoro) o
+        // `rebuild_tts_runtime` (engine switch / voz Piper).
+        let _ = control_tx.send(ControlMessage::SyncTtsRuntime);
+        // Refrescar el menú para mover `← activo` y/o el ✓.
+        let _ = control_tx.send(ControlMessage::RefreshMenu);
+    } else {
+        // No está: lanzar descarga en un thread dedicado.
+        // Para Kokoro: tras descargar, auto-activamos la voz clicada
+        // (porque el bundle se descargó por ella). Para Piper: sólo
+        // refresh — el usuario decide cuándo activar.
+        let _ = control_tx.send(ControlMessage::SetTrayState(TrayState::Loading));
+        let tx = control_tx.clone();
+        let dir = models_dir.clone();
+        let voice_id_owned = voice_id.to_string();
+        let cfg_for_dl = Arc::clone(cfg);
+        let is_kokoro_dl = is_kokoro_voice;
+        let span = tracing::info_span!(
+            "download_tts_voice_user",
+            voice_id = %voice_id_owned
+        );
+        let _ = thread::Builder::new()
+            .name("oido-tts-downloader".into())
+            .spawn(move || {
+                let _enter = span.enter();
+                let result = if is_kokoro_dl {
+                    download_kokoro_voice(&dir).map_err(|e| format!("Kokoro: {e:?}"))
+                } else {
+                    download_piper_voice(&dir, &voice_id_owned).map_err(|e| format!("Piper: {e:?}"))
+                };
+                match result {
+                    Ok(()) => {
+                        tracing::info!(
+                            voice_id = %voice_id_owned,
+                            "descarga TTS completa"
+                        );
+                        // Auto-activar Kokoro tras descarga: el bundle
+                        // se descargó por esta voz, así que la activamos.
+                        // Para Piper NO auto-activamos: otro click del
+                        // usuario lo activa.
+                        if is_kokoro_dl {
+                            let mut snap = cfg_for_dl.snapshot();
+                            let target_voice = if voice_id_owned == "kokoro" {
+                                "af_heart".to_string()
+                            } else {
+                                voice_id_owned.clone()
+                            };
+                            let mut changed = false;
+                            if snap.tts.engine != TtsEngineKind::Kokoro {
+                                snap.tts.engine = TtsEngineKind::Kokoro;
+                                changed = true;
+                            }
+                            if snap.tts.voice != target_voice {
+                                snap.tts.voice = target_voice.clone();
+                                changed = true;
+                            }
+                            if changed {
+                                cfg_for_dl.replace(snap.clone());
+                                if let Err(e) = cfg_for_dl.save() {
+                                    tracing::error!(
+                                        ?
+e, "no se pudo persistir tts.engine/voice tras descarga Kokoro"
+                                    );
+                                }
+                                tracing::info!(
+                                    voice = %target_voice,
+                                    "TTS Kokoro: voz auto-activada tras descarga"
+                                );
+                            }
+                        }
+                        // Refrescar menú para que aparezca ✓.
+                        let _ = tx.send(ControlMessage::RefreshMenu);
+                        // Sincronizar el runtime al engine/voz recién
+                        // activados (set_voice barato si es Kokoro, o
+                        // rebuild si cambió de engine).
+                        let _ = tx.send(ControlMessage::SyncTtsRuntime);
+                        // Restaurar estado de la bandeja.
+                        let _ = tx.send(ControlMessage::SetTrayState(TrayState::Idle));
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            voice_id = %voice_id_owned,
+                            error = %e,
+                            "descarga TTS falló"
+                        );
+                        let _ = tx.send(ControlMessage::SetTrayState(TrayState::Error));
+                    }
+                }
+            });
+    }
 }
 
 #[cfg(test)]

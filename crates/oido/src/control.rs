@@ -71,6 +71,16 @@ pub(crate) enum ControlMessage {
     SetTtsEngine(oido_config::TtsEngineKind),
     /// Cambio de voz TTS (`Config::tts.voice`).
     SetTtsVoice(String),
+    /// Sincroniza el TTS runtime con la config actual tras un cambio de
+    /// voz desde el submenú "Voces TTS". Decide entre `set_voice` barato
+    /// (Kokoro: todas las voces comparten el mismo `.onnx` + `voices.bin`)
+    /// o `rebuild_tts_runtime` (engine switch, o voz Piper que requiere
+    /// recargar un `.onnx` distinto).
+    ///
+    /// A diferencia de `SetTtsVoice`, este mensaje NO persiste config —
+    /// el caller (`handle_tts_model_click`) ya la mutó antes de enviarlo.
+    /// Sólo propaga el cambio al engine vivo.
+    SyncTtsRuntime,
     /// Cambio de velocidad TTS (`Config::tts.speed_milli`).
     SetTtsSpeed(u16),
     /// El usuario disparó "leer selección ahora" (vía menú o hotkey).

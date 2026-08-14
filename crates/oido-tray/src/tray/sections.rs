@@ -847,14 +847,15 @@ pub fn default_sections(ctx: &BuildContext) -> Vec<Box<dyn MenuSection>> {
     // accesible sin tener que cerrar y reabrir el menú. El único item
     // habilitado cuando `enabled=false` es el toggle, que actúa como
     // "puerta de entrada".
-    out.push(Box::new(TtsSection {
-        ui_language: ctx.ui_language,
-        enabled: ctx.tts_enabled,
-        engine: ctx.tts_engine,
-        voice: ctx.tts_voice.clone(),
-        speed_milli: ctx.tts_speed_milli,
-        hotkey: ctx.tts_hotkey.clone(),
-    }));
+    out.push(Box::new(TtsSection::new(
+        ctx.ui_language,
+        ctx.tts_enabled,
+        ctx.tts_engine,
+        ctx.tts_voice.clone(),
+        ctx.tts_speed_milli,
+        ctx.tts_hotkey.clone(),
+        ctx.models_dir.clone(),
+    )));
     out.push(Box::new(ExitSection {
         ui_language: ctx.ui_language,
     }));
@@ -866,12 +867,18 @@ pub fn default_sections(ctx: &BuildContext) -> Vec<Box<dyn MenuSection>> {
 // ---------------------------------------------------------------------------
 
 /// Subsección de menú que expone el toggle del TTS, selección de motor,
-/// selección de voz, velocidad y el botón "Leer selección ahora".
+/// submenú de voces (descarga + activación), velocidad y el botón
+/// "Leer selección ahora".
 ///
-/// El catálogo de voces es **estático** por ahora (3 voces Piper + 3
-/// Kokoro del F0 stub). F7 lo reemplazará por descubrimiento dinámico
-/// del `.onnx`/`.onnx.bin` en `models_dir` + parseo del JSON Piper /
-/// del `voices-v1.0.bin` Kokoro.
+/// El submenú "Voces TTS" replica el patrón de `ModelsSection`:
+/// cada voz aparece con `✓` (instalada), `↓ Descargar (NN MB)` (no
+/// instalada) o `← activo` (es la voz en uso). Click instala o
+/// activa — el dispatch en el bin (`handle_tts_model_click`) decide.
+///
+/// El catálogo de voces **se lee desde `oido_models::tts_catalog()`**
+/// en cada `build()` (igual que `ModelsSection` lee `catalog()`). Eso
+/// permite añadir voces sin tocar el código del menú — sólo ampliando
+/// el `static TTS_CATALOG` en `oido_models/src/tts_models.rs`.
 pub struct TtsSection {
     pub ui_language: UiLanguage,
     pub enabled: bool,
@@ -879,20 +886,14 @@ pub struct TtsSection {
     pub voice: String,
     pub speed_milli: u16,
     pub hotkey: String,
+    /// Directorio de modelos — `build()` lo escanea para saber qué
+    /// assets están instalados (espejo del campo `models_dir` en
+    /// `ModelsSection`).
+    pub models_dir: PathBuf,
 }
 
-const TTS_VOICES_PIPER: &[(&str, &str)] = &[
-    ("es_ES-davefx-medium", "Davefx (es-ES, medium)"),
-    ("es_MX-ald-medium", "Ald (es-MX, medium)"),
-    ("en_US-lessac-medium", "Lessac (en-US, medium)"),
-];
-
-const TTS_VOICES_KOKORO: &[(&str, &str)] = &[
-    ("af_heart", "Heart (en-US, female)"),
-    ("am_michael", "Michael (en-US, male)"),
-    ("bf_emma", "Emma (en-GB, female)"),
-];
-
+/// Velocidades disponibles para el submenú "Velocidad" (multiplicador
+/// expresado en millis: 1000 = 1.0×).
 const TTS_SPEEDS: &[(u16, &str)] = &[
     (500, "0.5x"),
     (750, "0.75x"),
@@ -902,85 +903,151 @@ const TTS_SPEEDS: &[(u16, &str)] = &[
     (2000, "2.0x"),
 ];
 
-impl MenuSection for TtsSection {
-    fn id(&self) -> &'static str {
-        "tts"
+/// Prefijo canónico para los IDs de items del submenú "Voces TTS".
+/// Lo parsea `id_to_action` y el bin lo extrae en
+/// `MenuAction::TtsModelItem(voice_id)`. NO colisiona con los
+/// prefijos existentes `tts_voice_`/`tts_speed_`/`tts_engine_`/
+/// `tts_toggle`/`tts_read_now`.
+pub const TTS_MODEL_ITEM_PREFIX: &str = "tts_model:";
+
+/// Voice ID canónico del bundle Kokoro (un solo item en el submenú
+/// porque los 54 voces comparten el mismo `.onnx` y `voices-v1.0.bin`).
+const KOKORO_BUNDLE_ID: &str = "kokoro";
+
+/// Construye el `id` canónico de un item del submenú "Voces TTS".
+pub fn tts_model_item_id(voice_id: &str) -> ItemId {
+    format!("{TTS_MODEL_ITEM_PREFIX}{voice_id}")
+}
+
+impl TtsSection {
+    pub fn new(
+        ui_language: UiLanguage,
+        enabled: bool,
+        engine: TtsEngineKind,
+        voice: String,
+        speed_milli: u16,
+        hotkey: String,
+        models_dir: PathBuf,
+    ) -> Self {
+        Self {
+            ui_language,
+            enabled,
+            engine,
+            voice,
+            speed_milli,
+            hotkey,
+            models_dir,
+        }
     }
 
-    fn build(&self) -> Vec<Section> {
-        // Como `MenuItemSpec` no soporta sub-submenús anidados (el
-        // layout del backend lo prohíbe), emitimos 4 items hermanos
-        // en lugar de uno anidado: Leer ahora / Toggle / Motor / Voz
-        // / Velocidad.
-        //
-        // Cuando `enabled=false` (TTS desactivado por el usuario),
-        // los items Motor/Voz/Velocidad/Leer ahora se renderizan con
-        // `enabled=false` (gris en el menú nativo — UI feedback claro
-        // de que están bloqueados). El único item accionable es el
-        // **toggle**, que actúa como puerta de entrada para reactivar.
-        // Esto evita que "desactivar" esconda la sección completa y
-        // haga imposible volver a activarla sin editar config.json.
+    /// Renderiza los items del submenú "Voces TTS".
+    ///
+    /// Estructura:
+    ///
+    /// ```text
+    /// ── Kokoro (inglés) ──
+    /// ✓ Heart (en-US, female)        ← activo (si kokoro instalado)
+    ///   ✓ Michael (en-US, male)
+    ///   ↓ Descargar Bella (en-US, female)        [gris: bundle no istalado]
+    ///   ...
+    /// ── Piper (multilingüe) ──
+    /// ✓ Piper Davefx (es-ES, medium)  ← activo
+    ///   ↓ Descargar Piper Ald (es-MX, medium)
+    ///   ...
+    /// ```
+    ///
+    /// Lógica de marca:
+    /// - **Kokoro**: el `.onnx` y `voices.bin` se descargan juntos
+    ///   como un bundle. Si el bundle está presente, las 28 voces
+    ///   individuales se marcan `✓`. Si NO está, se marcan grises
+    ///   (`enabled: false`) — clicar sobre una voz gris dispara el
+    ///   download del bundle completo (en `handle_tts_model_click`).
+    /// - **Piper**: cada voz es un archivo independiente. Marcamos
+    ///   `✓` si está descargada, `↓ Descargar` si no.
+    /// - **Activo**: `← activo` se añade en la voz que coincide con
+    ///   `self.voice` y el engine `self.engine`.
+    fn build_voices_submenu(&self, s: &Strings) -> Vec<MenuItemSpec> {
+        use oido_models::tts_models::{is_kokoro_installed, is_piper_voice_installed, tts_catalog};
         let mut items: Vec<MenuItemSpec> = Vec::new();
 
-        // Item directo: "Leer selección AHORA" (atajo al hotkey).
-        // Solo accionable si TTS está activado.
-        let read_now_label = if self.hotkey.is_empty() {
-            "Leer selección ahora".to_string()
-        } else {
-            format!("Leer selección ahora ({})", self.hotkey)
-        };
+        // --- Header Kokoro ---
         items.push(MenuItemSpec {
-            id: "tts_read_now".into(),
-            label: read_now_label,
-            enabled: self.enabled,
+            id: String::new(),
+            label: s.tts_voices_kokoro.into(),
+            enabled: false,
         });
 
-        // Toggle on/off — SIEMPRE accionable (es la puerta de entrada
-        // cuando TTS está desactivado).
+        // --- 28 voces Kokoro ---
+        let kokoro_bundle_installed = is_kokoro_installed(&self.models_dir);
+        for v in oido_models::tts_models::KOKORO_VOICES.iter() {
+            // Cada voz Kokoro individual es "instalada" si el bundle
+            // entero lo está, pues todas viven en el mismo .bin.
+            let installed = kokoro_bundle_installed;
+            let active = self.engine == TtsEngineKind::Kokoro && self.voice == v.id;
+            // Si el bundle NO está instalado, mostramos `↓ Descargar`
+            // pero el item DESHABILITADO (gris). El handler
+            // (`handle_tts_model_click`) traduce el click en descarga
+            // del bundle + activación de la voz.
+            let (prefix, enabled) = if installed {
+                (s.model_installed, true)
+            } else {
+                (s.model_download, true) // clickeable: dispara descarga
+            };
+            let mut label = format!("{}{}", prefix, v.display_name);
+            if active {
+                label.push_str(s.tts_active);
+            }
+            items.push(MenuItemSpec {
+                id: tts_model_item_id(v.id),
+                label,
+                enabled,
+            });
+        }
+
+        // --- Header Piper ---
         items.push(MenuItemSpec {
-            id: "tts_toggle".into(),
-            label: format!(
-                "{}  TTS: {}",
-                check_or_blank(self.enabled),
-                if self.enabled { "on" } else { "off (click para activar)" }
-            ),
-            enabled: true,
+            id: String::new(),
+            label: s.tts_voices_piper.into(),
+            enabled: false,
         });
 
-        // Submenú "Motor TTS". Solo accionable si TTS está activado.
-        items.push(MenuItemSpec {
-            id: "tts_engine_submenu".into(),
-            label: format!(
-                "Motor TTS: {}",
-                engine_short_label(self.engine)
-            ),
-            enabled: self.enabled,
-        });
+        // --- Items Piper (iteramos el catálogo) ---
+        // Piper: agrupamos por basename. `PiperOnnx` + `PiperConfigJson`
+        // son un par del mismo basename. Sólo necesitamos los `.onnx`
+        // para no listar el `.onnx.json` como item separado.
+        let piper_voices: Vec<String> = tts_catalog()
+            .iter()
+            .filter(|a| matches!(a.kind, oido_models::tts_models::TtsAssetKind::PiperOnnx))
+            .filter_map(|a| a.filename.strip_suffix(".onnx").map(String::from))
+            .collect();
 
-        // Submenú "Voz TTS".
-        items.push(MenuItemSpec {
-            id: "tts_voice_submenu".into(),
-            label: format!(
-                "Voz TTS: {}",
-                voice_short_label(&self.voice)
-            ),
-            enabled: self.enabled,
-        });
+        for basename in &piper_voices {
+            let installed = is_piper_voice_installed(&self.models_dir, basename);
+            let active = self.engine == TtsEngineKind::Piper && self.voice == *basename;
+            let display_name = oido_models::tts_models::piper_voice_display(basename);
+            let size_mb: u64 = 63; // Piper medium ≈ 63 MB
+            let mut label = format!(
+                "{}{} {} ({} MB)",
+                if installed {
+                    s.model_installed
+                } else {
+                    s.model_download
+                },
+                s.tts_piper_prefix,
+                display_name,
+                size_mb,
+            );
+            if active {
+                label.push_str(s.tts_active);
+            }
+            items.push(MenuItemSpec {
+                id: tts_model_item_id(basename),
+                label,
+                enabled: true,
+            });
+        }
 
-        // Submenú "Velocidad TTS".
-        items.push(MenuItemSpec {
-            id: "tts_speed_submenu".into(),
-            label: format!(
-                "Velocidad TTS: {}",
-                speed_short_label(self.speed_milli)
-            ),
-            enabled: self.enabled,
-        });
-
-        vec![Section::Submenu {
-            label: "Lectura de selección (TTS)".into(),
-            items,
-        }]
+        items
     }
 }
 
@@ -992,21 +1059,122 @@ fn engine_short_label(e: TtsEngineKind) -> &'static str {
     }
 }
 
-fn voice_short_label(id: &str) -> &str {
-    TTS_VOICES_PIPER
-        .iter()
-        .chain(TTS_VOICES_KOKORO.iter())
-        .find(|(k, _)| *k == id)
-        .map(|(_, v)| *v)
-        .unwrap_or(id)
-}
-
+/// Display name legible para una voz Piper. Ahora delega en
+/// `oido_models::tts_models::piper_voice_display` (la única fuente
+/// de verdad en el workspace).
 fn speed_short_label(milli: u16) -> &'static str {
     TTS_SPEEDS
         .iter()
         .find(|(k, _)| *k == milli)
         .map(|(_, v)| *v)
         .unwrap_or("?")
+}
+
+impl MenuSection for TtsSection {
+    fn id(&self) -> &'static str {
+        "tts"
+    }
+
+    fn build(&self) -> Vec<Section> {
+        let s = strings(self.ui_language);
+
+        // Items raíz de la sección TTS: leer ahora, toggle, motor,
+        // header del submenú "Voces TTS", velocidad.
+        //
+        // Cuando `enabled=false` (TTS desactivado por el usuario),
+        // los items no-toggle se renderizan con `enabled=false` (gris
+        // en el menú nativo) — UI feedback claro de que están
+        // bloqueados. El único item accionable es el **toggle**, que
+        // actúa como puerta de entrada para reactivar. Esto evita que
+        // "desactivar" esconda la sección completa y haga imposible
+        // volver a activarla sin editar config.json.
+        let mut items: Vec<MenuItemSpec> = Vec::new();
+
+        // Item directo: "Leer selección AHORA" (atajo al hotkey).
+        let read_now_label = if self.hotkey.is_empty() {
+            s.tts_read_now.to_string()
+        } else {
+            format!("{} ({})", s.tts_read_now, self.hotkey)
+        };
+        items.push(MenuItemSpec {
+            id: "tts_read_now".into(),
+            label: read_now_label,
+            enabled: self.enabled,
+        });
+
+        // Toggle on/off — SIEMPRE accionable.
+        items.push(MenuItemSpec {
+            id: "tts_toggle".into(),
+            label: format!(
+                "{}  TTS: {}",
+                check_or_blank(self.enabled),
+                if self.enabled {
+                    s.tts_toggle_on
+                } else {
+                    s.tts_toggle_off
+                }
+            ),
+            enabled: true,
+        });
+
+        // Item informativo: motor actual.
+        items.push(MenuItemSpec {
+            id: "tts_engine_label".into(),
+            label: format!(
+                "{}: {}",
+                s.tts_engine_label,
+                engine_short_label(self.engine)
+            ),
+            enabled: self.enabled,
+        });
+
+        // Item informativo: velocidad actual.
+        items.push(MenuItemSpec {
+            id: "tts_speed_label".into(),
+            label: format!(
+                "{}: {}",
+                s.tts_speed_label,
+                speed_short_label(self.speed_milli)
+            ),
+            enabled: self.enabled,
+        });
+
+        // Header "Voces TTS" — etiqueta visible que resume la voz
+        // activa. Los items clickeables (bundle Kokoro + voces Piper)
+        // se añaden al final como items hermanos con prefijo
+        // `tts_model:`. El backend de bandeja los renderiza como
+        // entradas del mismo submenú.
+        items.push(MenuItemSpec {
+            id: "tts_voices_header".into(),
+            label: format!(
+                "{}: {}",
+                s.tts_voices,
+                voice_active_label(s, self.engine, &self.voice)
+            ),
+            enabled: self.enabled,
+        });
+
+        // Items del submenú de voces (descargables + activables).
+        items.extend(self.build_voices_submenu(s));
+
+        vec![Section::Submenu {
+            label: s.tts_section.into(),
+            items,
+        }]
+    }
+}
+
+/// Etiqueta legible de la voz activa (para el header "Voces TTS").
+#[allow(unused_variables)]
+fn voice_active_label(s: &Strings, engine: TtsEngineKind, voice: &str) -> String {
+    match engine {
+        TtsEngineKind::Kokoro => format!("{} ({})", engine_short_label(engine), KOKORO_BUNDLE_ID),
+        TtsEngineKind::Piper => format!(
+            "{} ({})",
+            engine_short_label(engine),
+            oido_models::tts_models::piper_voice_display(voice)
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1221,9 @@ pub fn id_to_action(id: &str) -> Option<MenuAction> {
         "tts_engine_piper" => MenuAction::SetTtsEngine("piper".into()),
         id if id.starts_with("tts_voice_") && id != "tts_voice_submenu" => {
             MenuAction::SetTtsVoice(id["tts_voice_".len()..].to_string())
+        }
+        id if id.starts_with(TTS_MODEL_ITEM_PREFIX) => {
+            MenuAction::TtsModelItem(id[TTS_MODEL_ITEM_PREFIX.len()..].to_string())
         }
         id if id.starts_with("tts_speed_") => {
             // El id es "tts_speed_<milli>". Parseamos el sufijo.
@@ -1688,5 +1859,218 @@ mod tests {
             Section::Submenu { items, .. } => items,
             _ => panic!("se esperaba un submenú"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Tests específicos de TtsSection (submenú "Voces TTS")
+    // -------------------------------------------------------------------
+
+    /// `id_to_action` mapea ids `tts_model:<voice_id>` (incluyendo
+    /// `kokoro`) a `MenuAction::TtsModelItem(voice_id)`.
+    #[test]
+    fn id_to_action_maps_tts_model_items() {
+        // El id legacy "kokoro" (alias del bundle) también mapea.
+        assert_eq!(
+            id_to_action("tts_model:kokoro"),
+            Some(MenuAction::TtsModelItem("kokoro".to_string()))
+        );
+        // Voces Kokoro individuales.
+        for v in oido_models::tts_models::KOKORO_VOICES.iter() {
+            let id = tts_model_item_id(v.id);
+            assert_eq!(
+                id_to_action(&id),
+                Some(MenuAction::TtsModelItem(v.id.to_string())),
+                "id_to_action falla para {id}",
+            );
+        }
+        // Voces Piper.
+        for voice in [
+            "es_ES-davefx-medium",
+            "es_MX-ald-medium",
+            "en_US-lessac-medium",
+        ] {
+            let id = tts_model_item_id(voice);
+            assert_eq!(
+                id_to_action(&id),
+                Some(MenuAction::TtsModelItem(voice.to_string())),
+                "id_to_action falla para Piper {id}",
+            );
+        }
+    }
+
+    /// `tts_model_item_id` construye el id canónico (helper inverso
+    /// de `id_to_action`).
+    #[test]
+    fn tts_model_item_id_roundtrip() {
+        assert_eq!(tts_model_item_id("kokoro"), "tts_model:kokoro");
+        assert_eq!(
+            tts_model_item_id("es_ES-davefx-medium"),
+            "tts_model:es_ES-davefx-medium"
+        );
+    }
+
+    /// Sin modelos instalados, el submenú "Voces TTS" debe mostrar
+    /// `↓ Descargar` para las 28 voces Kokoro y todas las voces Piper.
+    #[test]
+    fn tts_section_voices_mark_all_downloadable_when_dir_empty() {
+        let (_tmp, dir) = empty_models_dir();
+        let sections = call_default(dir);
+        let tts = sections
+            .iter()
+            .find(|s| s.id() == "tts")
+            .expect("debe existir TtsSection");
+        let built = tts.build();
+        assert_eq!(built.len(), 1);
+        let items = match built.into_iter().next().unwrap() {
+            Section::Submenu { items, .. } => items,
+            _ => panic!("se esperaba un submenú"),
+        };
+
+        // Kokoro voices: las 28 deben estar marcadas `↓ Descargar`
+        // porque el bundle no está instalado.
+        let kokoro_count = oido_models::tts_models::KOKORO_VOICES.len();
+        assert_eq!(kokoro_count, 31, "catálogo Kokoro debe tener 31 voces");
+        for v in oido_models::tts_models::KOKORO_VOICES.iter() {
+            let id = tts_model_item_id(v.id);
+            let item = items
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap_or_else(|| panic!("item Kokoro {} no encontrado", v.id));
+            assert!(
+                item.label.starts_with("↓ Descargar ") || item.label.starts_with("↓ Download "),
+                "Kokoro {} sin instalar debe mostrar ↓: {}",
+                v.id,
+                item.label
+            );
+        }
+
+        // Piper voices: no instaladas
+        for voice in [
+            "es_ES-davefx-medium",
+            "es_MX-ald-medium",
+            "en_US-lessac-medium",
+        ] {
+            let id = tts_model_item_id(voice);
+            let item = items
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap_or_else(|| panic!("item {voice} no encontrado"));
+            assert!(
+                item.label.starts_with("↓ Descargar ") || item.label.starts_with("↓ Download "),
+                "{voice} sin instalar debe mostrar ↓: {}",
+                item.label
+            );
+        }
+    }
+
+    /// Voz Piper instalada y activa → ✓ + ← activo.
+    #[test]
+    fn tts_section_marks_piper_active_and_installed() {
+        let (_tmp, dir) = empty_models_dir();
+        // Simular Piper `es_ES-davefx-medium` instalado
+        std::fs::write(dir.join("es_ES-davefx-medium.onnx"), b"x").unwrap();
+        std::fs::write(dir.join("es_ES-davefx-medium.onnx.json"), b"{}").unwrap();
+
+        let sections = call_default(dir);
+        let tts = sections.iter().find(|s| s.id() == "tts").unwrap();
+        let items = match tts.build().into_iter().next().unwrap() {
+            Section::Submenu { items, .. } => items,
+            _ => panic!("se esperaba un submenú"),
+        };
+
+        let davefx = items
+            .iter()
+            .find(|i| i.id == "tts_model:es_ES-davefx-medium")
+            .unwrap();
+        assert!(
+            davefx.label.starts_with("✓ "),
+            "Davefx instalado: {}",
+            davefx.label
+        );
+        assert!(
+            davefx.label.contains("← activo") || davefx.label.contains("← active"),
+            "Davefx activo: {}",
+            davefx.label
+        );
+
+        // Las otras voces Piper NO instaladas.
+        let ald = items
+            .iter()
+            .find(|i| i.id == "tts_model:es_MX-ald-medium")
+            .unwrap();
+        assert!(
+            ald.label.starts_with("↓ Descargar ") || ald.label.starts_with("↓ Download "),
+            "Ald sin instalar: {}",
+            ald.label
+        );
+    }
+
+    /// Kokoro instalado y activo → ✓ + ← activo en la voz específica.
+    #[test]
+    fn tts_section_marks_kokoro_active_when_installed() {
+        let (_tmp, dir) = empty_models_dir();
+        std::fs::write(dir.join("kokoro-82m-v1.0.onnx"), b"x").unwrap();
+        std::fs::write(dir.join("voices-v1.0.bin"), b"x").unwrap();
+
+        // Cambiar el engine a Kokoro en el ctx, con la voz específica
+        // `bm_george` (no la default af_heart) para verificar que el
+        // `← activo` cae en la voz correcta, no siempre en af_heart.
+        let mut ctx = BuildContext {
+            models_dir: dir.clone(),
+            active_model: "ggml-base.bin".into(),
+            ui_language: UiLanguage::Es,
+            theme: Theme::System,
+            stt_mode: SttMode::Batch,
+            prompt_preset: PromptPreset::BilingualEsEn,
+            prompt_custom_text: String::new(),
+            effort: EffortPreset::Balanced,
+            model_lang_mismatch: None,
+            input_devices: Vec::new(),
+            input_device: None,
+            tts_enabled: true,
+            tts_engine: TtsEngineKind::Kokoro,
+            tts_voice: "bm_george".into(),
+            tts_speed_milli: 1000,
+            tts_hotkey: "Ctrl+Shift+S".into(),
+        };
+        let sections = default_sections(&ctx);
+        let tts = sections.iter().find(|s| s.id() == "tts").unwrap();
+        let items = match tts.build().into_iter().next().unwrap() {
+            Section::Submenu { items, .. } => items,
+            _ => panic!("se esperaba un submenú"),
+        };
+        // La voz bm_george debe estar marcada `✓` + `← activo`.
+        let george = items
+            .iter()
+            .find(|i| i.id == "tts_model:bm_george")
+            .expect("item bm_george");
+        assert!(
+            george.label.starts_with("✓ "),
+            "bm_george: {}",
+            george.label
+        );
+        assert!(
+            george.label.contains("← activo") || george.label.contains("← active"),
+            "bm_george activo: {}",
+            george.label
+        );
+
+        // Otra voz Kokoro (af_heart) NO debe estar activa.
+        let heart = items
+            .iter()
+            .find(|i| i.id == "tts_model:af_heart")
+            .expect("item af_heart");
+        assert!(
+            heart.label.starts_with("✓ "),
+            "af_heart instalado: {}",
+            heart.label
+        );
+        assert!(
+            !heart.label.contains("← activo") && !heart.label.contains("← active"),
+            "af_heart NO debe estar activo: {}",
+            heart.label
+        );
+        // Suppress unused warning(s) for ctx.
+        let _ = &mut ctx;
     }
 }

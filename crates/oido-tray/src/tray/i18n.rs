@@ -96,6 +96,20 @@ pub struct Strings {
     pub mic_reprobe: &'static str,
     pub mic_none: &'static str,
     pub mic_active: &'static str, // sufijo "← activo" / "← active"
+
+    // Submenú "TTS / Lectura de selección" (NUEVO — F7).
+    pub tts_section: &'static str,       // "Lectura de selección (TTS)"
+    pub tts_voices: &'static str,        // "Voces TTS"
+    pub tts_voices_kokoro: &'static str, // "── Kokoro (inglés) ──"
+    pub tts_voices_piper: &'static str,  // "── Piper (multilingüe) ──"
+    pub tts_active: &'static str, // "← activo" (reusado conceptualmente; valor idéntico a model_active)
+    pub tts_read_now: &'static str, // "Leer selección ahora"
+    pub tts_toggle_on: &'static str, // "on"
+    pub tts_toggle_off: &'static str, // "off (click para activar)"
+    pub tts_engine_label: &'static str, // "Motor TTS"
+    pub tts_speed_label: &'static str, // "Velocidad TTS"
+    pub tts_kokoro_prefix: &'static str, // "Kokoro (modelo + banco de voces)"
+    pub tts_piper_prefix: &'static str, // "Piper" (prefijo del item de voz)
 }
 
 /// Selecciona la tabla de strings para el idioma de UI activo.
@@ -164,6 +178,19 @@ pub static STRINGS_ES: Strings = Strings {
     mic_reprobe: "Re-probar micrófonos…",
     mic_none: "No se detectaron dispositivos de entrada",
     mic_active: "  ← activo",
+
+    tts_section: "Lectura de selección (TTS)",
+    tts_voices: "Voces TTS",
+    tts_voices_kokoro: "── Kokoro (inglés) ──",
+    tts_voices_piper: "── Piper (multilingüe) ──",
+    tts_active: "  ← activo",
+    tts_read_now: "Leer selección ahora",
+    tts_toggle_on: "on",
+    tts_toggle_off: "off (click para activar)",
+    tts_engine_label: "Motor TTS",
+    tts_speed_label: "Velocidad TTS",
+    tts_kokoro_prefix: "Kokoro (modelo + banco de voces)",
+    tts_piper_prefix: "Piper",
 };
 
 /// Inglés puro.
@@ -222,6 +249,19 @@ pub static STRINGS_EN: Strings = Strings {
     mic_reprobe: "Re-probe microphones…",
     mic_none: "No input devices detected",
     mic_active: "  ← active",
+
+    tts_section: "Selection reading (TTS)",
+    tts_voices: "TTS voices",
+    tts_voices_kokoro: "── Kokoro (English) ──",
+    tts_voices_piper: "── Piper (multilingual) ──",
+    tts_active: "  ← active",
+    tts_read_now: "Read selection now",
+    tts_toggle_on: "on",
+    tts_toggle_off: "off (click to activate)",
+    tts_engine_label: "TTS engine",
+    tts_speed_label: "TTS speed",
+    tts_kokoro_prefix: "Kokoro (model + voice bank)",
+    tts_piper_prefix: "Piper",
 };
 
 /// Bilingüe: secciones críticas con ES + EN, resto en ES.
@@ -283,6 +323,19 @@ pub static STRINGS_BILINGUAL: Strings = Strings {
     mic_reprobe: "Re-probar micrófonos / Re-probe microphones…",
     mic_none: "No se detectaron dispositivos / No input devices detected",
     mic_active: "  ← activo / active",
+
+    tts_section: "Lectura de selección (TTS) / Selection reading (TTS)",
+    tts_voices: "Voces TTS / TTS voices",
+    tts_voices_kokoro: "── Kokoro (inglés / English) ──",
+    tts_voices_piper: "── Piper (multilingüe / multilingual) ──",
+    tts_active: "  ← activo / active",
+    tts_read_now: "Leer selección ahora / Read selection now",
+    tts_toggle_on: "on",
+    tts_toggle_off: "off (click para activar / to activate)",
+    tts_engine_label: "Motor TTS / TTS engine",
+    tts_speed_label: "Velocidad TTS / TTS speed",
+    tts_kokoro_prefix: "Kokoro (modelo + banco / model + bank)",
+    tts_piper_prefix: "Piper",
 };
 
 #[cfg(test)]
@@ -383,6 +436,18 @@ mod tests {
                 ("mic_reprobe", t.mic_reprobe),
                 ("mic_none", t.mic_none),
                 ("mic_active", t.mic_active),
+                ("tts_section", t.tts_section),
+                ("tts_voices", t.tts_voices),
+                ("tts_voices_kokoro", t.tts_voices_kokoro),
+                ("tts_voices_piper", t.tts_voices_piper),
+                ("tts_active", t.tts_active),
+                ("tts_read_now", t.tts_read_now),
+                ("tts_toggle_on", t.tts_toggle_on),
+                ("tts_toggle_off", t.tts_toggle_off),
+                ("tts_engine_label", t.tts_engine_label),
+                ("tts_speed_label", t.tts_speed_label),
+                ("tts_kokoro_prefix", t.tts_kokoro_prefix),
+                ("tts_piper_prefix", t.tts_piper_prefix),
             ];
             for (key, val) in s {
                 assert!(

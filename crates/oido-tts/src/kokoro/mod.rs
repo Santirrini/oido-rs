@@ -72,9 +72,42 @@ use crate::{AudioChunk, Engine, TtsError, VoiceDescriptor};
 /// `voice_ids()` del `VoiceBank` cargado se cruza con este catálogo
 /// para añadir `display_name` y `language`.
 const KOKORO_VOICES: &[(&str, &str, &str)] = &[
+    // === American English (en-US, female) ===
     ("af_heart", "Heart (en-US, female)", "en-US"),
+    ("af_alloy", "Alloy (en-US, female)", "en-US"),
+    ("af_aoede", "Aoede (en-US, female)", "en-US"),
+    ("af_bella", "Bella (en-US, female)", "en-US"),
+    ("af_jessica", "Jessica (en-US, female)", "en-US"),
+    ("af_kore", "Kore (en-US, female)", "en-US"),
+    ("af_nicole", "Nicole (en-US, female)", "en-US"),
+    ("af_nova", "Nova (en-US, female)", "en-US"),
+    ("af_river", "River (en-US, female)", "en-US"),
+    ("af_sarah", "Sarah (en-US, female)", "en-US"),
+    ("af_sky", "Sky (en-US, female)", "en-US"),
+    // === American English (en-US, male) ===
+    ("am_adam", "Adam (en-US, male)", "en-US"),
+    ("am_echo", "Echo (en-US, male)", "en-US"),
+    ("am_eric", "Eric (en-US, male)", "en-US"),
+    ("am_fenrir", "Fenrir (en-US, male)", "en-US"),
+    ("am_liam", "Liam (en-US, male)", "en-US"),
     ("am_michael", "Michael (en-US, male)", "en-US"),
+    ("am_onyx", "Onyx (en-US, male)", "en-US"),
+    ("am_puck", "Puck (en-US, male)", "en-US"),
+    ("am_santa", "Santa (en-US, male)", "en-US"),
+    // === British English (en-GB, female) ===
+    ("bf_alice", "Alice (en-GB, female)", "en-GB"),
     ("bf_emma", "Emma (en-GB, female)", "en-GB"),
+    ("bf_isabella", "Isabella (en-GB, female)", "en-GB"),
+    ("bf_lily", "Lily (en-GB, female)", "en-GB"),
+    // === British English (en-GB, male) ===
+    ("bm_daniel", "Daniel (en-GB, male)", "en-GB"),
+    ("bm_fable", "Fable (en-GB, male)", "en-GB"),
+    ("bm_george", "George (en-GB, male)", "en-GB"),
+    ("bm_lewis", "Lewis (en-GB, male)", "en-GB"),
+    // === Spanish (es, female & male) ===
+    ("ef_dora", "Dora (es, female)", "es"),
+    ("em_alex", "Alex (es, male)", "es"),
+    ("em_santa", "Santa (es, male)", "es"),
 ];
 
 /// Backend TTS Kokoro-82M.
@@ -113,13 +146,6 @@ impl KokoroEngine {
             model_path: None,
             speed_milli: 1000, // 1.0× default; mismo default que Config::tts.
         }
-    }
-
-    /// Setter de la voz activa. NO recarga el modelo: se usa en el
-    /// siguiente `synthesize`. Igual que
-    /// `PiperEngine::set_speed_milli`.
-    pub fn set_voice(&mut self, voice: impl Into<String>) {
-        self.voice_id = voice.into();
     }
 
     /// Setter runtime del multiplicador de velocidad.
@@ -192,9 +218,9 @@ impl Engine for KokoroEngine {
         //    cualquier motivo.
         let session = {
             let session_guard = self.session.lock();
-            let session = session_guard.as_ref().ok_or_else(|| {
-                TtsError::Backend("modelo no cargado".to_string())
-            })?;
+            let session = session_guard
+                .as_ref()
+                .ok_or_else(|| TtsError::Backend("modelo no cargado".to_string()))?;
             if !session.is_loaded() {
                 return Err(TtsError::Backend(
                     "modelo o banco de voces no cargado".into(),
@@ -203,12 +229,16 @@ impl Engine for KokoroEngine {
             session.clone()
         };
 
-        // 2. G2P: texto → IDs. Rechaza vacío.
+        // 2. G2P: texto → IDs. El G2P se enruta por el idioma de la voz
+        //    (prefijo `ef_*`/`em_*` = español, resto = inglés), no por
+        //    el contenido del texto: el español ASCII sin tildes
+        //    ("Simulacion Medica") pasaría por el G2P inglés y el modelo
+        //    deletrearía. Ver `g2p::KokoroLang::from_voice`.
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Err(TtsError::TextTooShort);
         }
-        let phoneme_ids = g2p::phonemize(trimmed)?;
+        let phoneme_ids = g2p::phonemize(trimmed, &self.voice_id)?;
         if phoneme_ids.is_empty() {
             return Err(TtsError::Phonemization(format!(
                 "G2P no produjo fonemas para '{trimmed}'"
@@ -314,7 +344,19 @@ impl Engine for KokoroEngine {
     fn engine_kind(&self) -> TtsEngineKind {
         TtsEngineKind::Kokoro
     }
+
+    fn set_voice(&mut self, voice: &str) {
+        self.voice_id = voice.to_string();
+    }
 }
+
+// `KOKORO_VOICES` (privado) es la fuente de verdad dentro de
+// `oido-tts`. La **única** lista canónica consumida por el resto del
+// workspace vive en `oido_models::tts_models::KOKORO_VOICES` (espejo
+// del upstream `onnx-community/Kokoro-82M-v1.0-ONNX` README).
+// `Engine::voices()` (línea 343) y los tests de este módulo usan la
+// copia local; `oido-tray::TtsSection::build_voices_submenu` consume
+// la de `oido-models`.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -342,24 +384,34 @@ mod tests {
         assert_eq!(engine.engine_kind(), TtsEngineKind::Kokoro);
     }
 
-    /// El catálogo embebido de voces debe incluir al menos las 3
-    /// voces canónicas que el submenú muestra por default.
+    /// El catálogo embebido de voces debe incluir las 28 voces
+    /// canónicas del `voices-v1.0.bin` de Kokoro v1.0. Si cambia
+    /// el `.bin` upstream, este test alertará para actualizar
+    /// `KOKORO_VOICES` (en este módulo) y
+    /// `oido_models::tts_models::KOKORO_VOICES` (la copia pública).
     #[test]
-    fn kokoro_voices_catalog_has_three_entries() {
+    fn kokoro_voices_catalog_has_all_entries() {
         let engine = KokoroEngine::new("af_heart");
         let voices = engine.voices();
-        assert_eq!(voices.len(), 3, "catálogo F0 debe tener 3 voces");
+        assert_eq!(voices.len(), 31, "catálogo Kokoro debe tener 31 voces");
         for v in &voices {
             assert_eq!(v.engine, TtsEngineKind::Kokoro);
             assert!(!v.id.is_empty());
             assert!(!v.display_name.is_empty());
             assert!(!v.language.is_empty());
         }
-        // El ID pasado a `new` debe estar en el catálogo (sanity
-        // check: si F4 cambia el catálogo, esto rompe a propósito).
+        // Sanity checks: voces que NO pueden faltar.
         assert!(
             voices.iter().any(|v| v.id == "af_heart"),
             "af_heart debe estar en el catálogo"
+        );
+        assert!(
+            voices.iter().any(|v| v.id == "am_michael"),
+            "am_michael debe estar en el catálogo"
+        );
+        assert!(
+            voices.iter().any(|v| v.id == "bf_emma"),
+            "bf_emma debe estar en el catálogo"
         );
     }
 
@@ -378,9 +430,9 @@ mod tests {
                     "mensaje debería mencionar 'no cargado', obtuve: {msg}"
                 );
             }
-            Err(other) => panic!(
-                "esperaba TtsError::Backend(\"modelo no cargado\"), obtuve: {other:?}"
-            ),
+            Err(other) => {
+                panic!("esperaba TtsError::Backend(\"modelo no cargado\"), obtuve: {other:?}")
+            }
             Ok(_) => panic!("synthesize sin modelo cargado NO debe devolver Ok"),
         }
     }
@@ -418,6 +470,22 @@ mod tests {
         let mut engine = KokoroEngine::new("af_heart");
         engine.set_speed_milli(1500);
         assert!((engine.speed() - 1.5).abs() < f32::EPSILON);
+    }
+
+    /// `set_voice` (método del trait `Engine`) actualiza el `voice_id`
+    /// en caliente sin recargar el modelo. Garantiza que el handler
+    /// `SyncTtsRuntime` del control loop pueda cambiar de voz Kokoro
+    /// sin pagar la recarga del `.onnx` (326 MB).
+    #[test]
+    fn kokoro_set_voice_updates_voice_id() {
+        let mut engine = KokoroEngine::new("af_heart");
+        assert_eq!(engine.voice_id(), "af_heart");
+        // Cambio en caliente vía el trait (no el constructor).
+        engine.set_voice("am_michael");
+        assert_eq!(engine.voice_id(), "am_michael");
+        // Y un segundo cambio para confirmar que no es one-shot.
+        engine.set_voice("bf_emma");
+        assert_eq!(engine.voice_id(), "bf_emma");
     }
 
     /// `is_loaded()` antes de `load` debe ser `false`. Sin modelo no

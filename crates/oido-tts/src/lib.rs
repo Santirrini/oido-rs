@@ -33,7 +33,9 @@ pub mod voices;
 
 pub use kokoro::KokoroEngine;
 pub use piper::PiperEngine;
-pub use voices::{known_voice_ids, piper_default_voice, KOKORO_DEFAULT_VOICES, PIPER_DEFAULT_VOICES};
+pub use voices::{
+    known_voice_ids, piper_default_voice, KOKORO_DEFAULT_VOICES, PIPER_DEFAULT_VOICES,
+};
 
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
@@ -150,6 +152,20 @@ pub trait Engine: Send + Sync + Debug {
     /// Etiqueta del engine (Piper, Kokoro). Lo usa el observador de
     /// estado del tray para mostrar "Leyendo con Piper — af_heart".
     fn engine_kind(&self) -> TtsEngineKind;
+
+    /// Cambia la voz activa en caliente (muta sólo el campo `voice_id`,
+    /// sin recargar modelo).
+    ///
+    /// Para engines donde todas las voces comparten un solo modelo
+    /// (Kokoro: 31 voces en un `voices-v1.0.bin`) esto es instantáneo y
+    /// suficiente. Para engines donde cada voz es un archivo distinto
+    /// (Piper: un `.onnx` por voz) el caller debe además recargar el
+    /// modelo con `load()` apuntando al nuevo path — `set_voice` solo
+    /// actualiza el `voice_id` y el `g2p_lang` cacheado.
+    ///
+    /// Recibe `&str` (no `impl Into<String>`) porque es método de trait:
+    /// los impls concretos hacen `.to_string()` internamente.
+    fn set_voice(&mut self, voice: &str);
 }
 
 /// Constructor factory (espejo de `TranscriberFactory`). Permite al
@@ -220,6 +236,10 @@ impl Engine for SharedEngine {
 
     fn engine_kind(&self) -> TtsEngineKind {
         self.inner.lock().engine_kind()
+    }
+
+    fn set_voice(&mut self, voice: &str) {
+        self.inner.lock().set_voice(voice);
     }
 }
 

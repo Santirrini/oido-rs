@@ -45,7 +45,7 @@ pub enum TtsAssetKind {
     /// ~163 MB fp16, ~92 MB int8). Para v1.0 fijamos fp16 por tamaño/
     /// calidad razonables.
     KokoroOnnx,
-    /// `voices-v1.0.bin` — banco de 54 voces, ~25 MB. Se descarga
+    /// `voices-v1.0.bin` — banco de 28 voces, ~25 MB. Se descarga
     /// una sola vez y se comparte entre todas las voces Kokoro.
     KokoroVoices,
     /// `<voice>.onnx` de Piper, ~14-65 MB por voz.
@@ -54,6 +54,209 @@ pub enum TtsAssetKind {
     /// `inference.noise_scale`, etc.). Debe existir en el mismo dir
     /// que el `.onnx` con el mismo basename.
     PiperConfigJson,
+}
+
+/// Metadata de una voz TTS, expuesta para construir el submenú del
+/// tray. La `display_name` es el texto humano-legible que el usuario
+/// ve en el menú; `id` es el identificador canónico que se persiste
+/// en `Config.tts.voice`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsVoiceInfo {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub language: &'static str,
+}
+
+/// Catálogo de voces Kokoro disponibles en `voices-v1.0.bin` v1.0.
+///
+/// Lista **28 voces** (todas inglés: en-US y en-GB). El `.bin`
+/// upstream las entrega con estos IDs exactos — la lista está
+/// verificada contra `onnx-community/Kokoro-82M-v1.0-ONNX` README.
+pub const KOKORO_VOICES: &[TtsVoiceInfo] = &[
+    // === American English (en-US, female) ===
+    TtsVoiceInfo {
+        id: "af_heart",
+        display_name: "Heart (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_alloy",
+        display_name: "Alloy (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_aoede",
+        display_name: "Aoede (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_bella",
+        display_name: "Bella (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_jessica",
+        display_name: "Jessica (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_kore",
+        display_name: "Kore (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_nicole",
+        display_name: "Nicole (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_nova",
+        display_name: "Nova (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_river",
+        display_name: "River (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_sarah",
+        display_name: "Sarah (en-US, female)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "af_sky",
+        display_name: "Sky (en-US, female)",
+        language: "en-US",
+    },
+    // === American English (en-US, male) ===
+    TtsVoiceInfo {
+        id: "am_adam",
+        display_name: "Adam (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_echo",
+        display_name: "Echo (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_eric",
+        display_name: "Eric (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_fenrir",
+        display_name: "Fenrir (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_liam",
+        display_name: "Liam (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_michael",
+        display_name: "Michael (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_onyx",
+        display_name: "Onyx (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_puck",
+        display_name: "Puck (en-US, male)",
+        language: "en-US",
+    },
+    TtsVoiceInfo {
+        id: "am_santa",
+        display_name: "Santa (en-US, male)",
+        language: "en-US",
+    },
+    // === British English (en-GB, female) ===
+    TtsVoiceInfo {
+        id: "bf_alice",
+        display_name: "Alice (en-GB, female)",
+        language: "en-GB",
+    },
+    TtsVoiceInfo {
+        id: "bf_emma",
+        display_name: "Emma (en-GB, female)",
+        language: "en-GB",
+    },
+    TtsVoiceInfo {
+        id: "bf_isabella",
+        display_name: "Isabella (en-GB, female)",
+        language: "en-GB",
+    },
+    TtsVoiceInfo {
+        id: "bf_lily",
+        display_name: "Lily (en-GB, female)",
+        language: "en-GB",
+    },
+    // === British English (en-GB, male) ===
+    TtsVoiceInfo {
+        id: "bm_daniel",
+        display_name: "Daniel (en-GB, male)",
+        language: "en-GB",
+    },
+    TtsVoiceInfo {
+        id: "bm_fable",
+        display_name: "Fable (en-GB, male)",
+        language: "en-GB",
+    },
+    TtsVoiceInfo {
+        id: "bm_george",
+        display_name: "George (en-GB, male)",
+        language: "en-GB",
+    },
+    TtsVoiceInfo {
+        id: "bm_lewis",
+        display_name: "Lewis (en-GB, male)",
+        language: "en-GB",
+    },
+    // === Spanish (es, female & male) ===
+    TtsVoiceInfo {
+        id: "ef_dora",
+        display_name: "Dora (es, female)",
+        language: "es",
+    },
+    TtsVoiceInfo {
+        id: "em_alex",
+        display_name: "Alex (es, male)",
+        language: "es",
+    },
+    TtsVoiceInfo {
+        id: "em_santa",
+        display_name: "Santa (es, male)",
+        language: "es",
+    },
+];
+
+/// Catálogo de voces Piper del submenú del tray. Verificado contra
+/// `rhasspy/piper-voices` HF repo.
+pub const PIPER_VOICE_DISPLAY: &[(&str, &str, &str)] = &[
+    ("es_ES-davefx-medium", "Davefx (es-ES, medium)", "es-ES"),
+    ("es_MX-ald-medium", "Ald (es-MX, medium)", "es-MX"),
+    ("es_MX-claude-high", "Claude (es-MX, high)", "es-MX"),
+    ("es_AR-daniela-high", "Daniela (es-AR, high)", "es-AR"),
+    ("en_US-lessac-medium", "Lessac (en-US, medium)", "en-US"),
+    ("ar_JO-kareem-low", "Kareem (ar-JO, low)", "ar-JO"),
+    ("de_DE-thorsten-high", "Thorsten (de-DE, high)", "de-DE"),
+];
+
+/// Devuelve la información de display para una voz Piper por basename.
+/// Devuelve `&str` vacío si no está catalogada.
+#[must_use]
+pub fn piper_voice_display(basename: &str) -> &'static str {
+    for (id, display, _) in PIPER_VOICE_DISPLAY {
+        if *id == basename {
+            return display;
+        }
+    }
+    "Unknown voice"
 }
 
 /// Descripción inmutable de un asset TTS descargable.
@@ -96,11 +299,11 @@ static TTS_CATALOG: LazyLock<Vec<TtsAsset>> = LazyLock::new(|| {
         TtsAsset {
             kind: TtsAssetKind::KokoroVoices,
             // Banco de voces Kokoro — fuente: thewh1teagle/kokoro-onnx
-            // (release v1.0.0 — verificado a mano, sha256 a confirmar al
+            // (release model-files-v1.0 — verificado a mano, sha256 a confirmar al
             // primer deploy).
             filename: "voices-v1.0.bin".into(),
             size_bytes: 26_000_000,
-            url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/v1.0.0/voices-v1.0.bin".into(),
+            url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin".into(),
             sha256: String::new(),
         },
         // === Piper — voces multilingües + inglés ===
@@ -145,6 +348,67 @@ static TTS_CATALOG: LazyLock<Vec<TtsAsset>> = LazyLock::new(|| {
             filename: "en_US-lessac-medium.onnx.json".into(),
             size_bytes: 4_500,
             url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json".into(),
+            sha256: String::new(),
+        },
+        // === Piper — voces adicionales (multi-idioma, high/low quality) ===
+        // ar_JO-kareem (low) — árabe jordano, voz masculina, ~63 MB
+        TtsAsset {
+            kind: TtsAssetKind::PiperOnnx,
+            filename: "ar_JO-kareem-low.onnx".into(),
+            size_bytes: 63_000_000,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/low/ar_JO-kareem-low.onnx".into(),
+            sha256: String::new(),
+        },
+        TtsAsset {
+            kind: TtsAssetKind::PiperConfigJson,
+            filename: "ar_JO-kareem-low.onnx.json".into(),
+            size_bytes: 4_500,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/low/ar_JO-kareem-low.onnx.json".into(),
+            sha256: String::new(),
+        },
+        // de_DE-thorsten (high) — alemán, voz masculina, ~114 MB
+        TtsAsset {
+            kind: TtsAssetKind::PiperOnnx,
+            filename: "de_DE-thorsten-high.onnx".into(),
+            size_bytes: 114_000_000,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx".into(),
+            sha256: String::new(),
+        },
+        TtsAsset {
+            kind: TtsAssetKind::PiperConfigJson,
+            filename: "de_DE-thorsten-high.onnx.json".into(),
+            size_bytes: 4_500,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json".into(),
+            sha256: String::new(),
+        },
+        // es_AR-daniela (high) — español argentino, voz femenina, ~114 MB
+        TtsAsset {
+            kind: TtsAssetKind::PiperOnnx,
+            filename: "es_AR-daniela-high.onnx".into(),
+            size_bytes: 114_000_000,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/es_AR-daniela-high.onnx".into(),
+            sha256: String::new(),
+        },
+        TtsAsset {
+            kind: TtsAssetKind::PiperConfigJson,
+            filename: "es_AR-daniela-high.onnx.json".into(),
+            size_bytes: 4_500,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_AR/daniela/high/es_AR-daniela-high.onnx.json".into(),
+            sha256: String::new(),
+        },
+        // es_MX-claude (high) — español mexicano, voz masculina, ~63 MB
+        TtsAsset {
+            kind: TtsAssetKind::PiperOnnx,
+            filename: "es_MX-claude-high.onnx".into(),
+            size_bytes: 63_000_000,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx".into(),
+            sha256: String::new(),
+        },
+        TtsAsset {
+            kind: TtsAssetKind::PiperConfigJson,
+            filename: "es_MX-claude-high.onnx.json".into(),
+            size_bytes: 4_500,
+            url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx.json".into(),
             sha256: String::new(),
         },
     ]
@@ -250,9 +514,7 @@ pub fn download_tts_asset(
     }
 
     let digest = hex::encode(hasher.finalize());
-    if !asset.sha256.is_empty()
-        && !asset.sha256.eq_ignore_ascii_case(&digest)
-    {
+    if !asset.sha256.is_empty() && !asset.sha256.eq_ignore_ascii_case(&digest) {
         return Err(ModelError::ChecksumMismatch(asset.filename.clone()));
     }
     if asset.sha256.is_empty() {
@@ -282,15 +544,31 @@ pub fn download_piper_voice(
 ) -> Result<(), ModelError> {
     let onnx_name = format!("{voice_basename}.onnx");
     let json_name = format!("{voice_basename}.onnx.json");
-    let onnx = find_tts(&onnx_name)
-        .ok_or_else(|| ModelError::Download(format!("voz Piper {voice_basename} no catalogada (falta .onnx)")))?;
-    let json = find_tts(&json_name)
-        .ok_or_else(|| ModelError::Download(format!("voz Piper {voice_basename} no catalogada (falta .onnx.json)")))?;
+    let onnx = find_tts(&onnx_name).ok_or_else(|| {
+        ModelError::Download(format!(
+            "voz Piper {voice_basename} no catalogada (falta .onnx)"
+        ))
+    })?;
+    let json = find_tts(&json_name).ok_or_else(|| {
+        ModelError::Download(format!(
+            "voz Piper {voice_basename} no catalogada (falta .onnx.json)"
+        ))
+    })?;
 
-    download_tts_asset(models_dir, onnx, None)?;
-    // Si el JSON falla, dejamos el .onnx ya en disco (es mejor que
-    // descargarlo otra vez la próxima vez).
-    download_tts_asset(models_dir, json, None)?;
+    if is_piper_voice_installed(models_dir, voice_basename) {
+        return Err(ModelError::AlreadyInstalled(onnx_name));
+    }
+
+    match download_tts_asset(models_dir, onnx, None) {
+        Ok(()) | Err(ModelError::AlreadyInstalled(_)) => {}
+        Err(e) => return Err(e),
+    }
+
+    match download_tts_asset(models_dir, json, None) {
+        Ok(()) | Err(ModelError::AlreadyInstalled(_)) => {}
+        Err(e) => return Err(e),
+    }
+
     Ok(())
 }
 
@@ -307,8 +585,20 @@ pub fn download_kokoro_voice(models_dir: &Path) -> Result<(), ModelError> {
         .find(|a| a.kind == TtsAssetKind::KokoroVoices)
         .expect("siempre presente en catálogo");
 
-    download_tts_asset(models_dir, onnx, None)?;
-    download_tts_asset(models_dir, voices, None)?;
+    if is_kokoro_installed(models_dir) {
+        return Err(ModelError::AlreadyInstalled(onnx.filename.clone()));
+    }
+
+    match download_tts_asset(models_dir, onnx, None) {
+        Ok(()) | Err(ModelError::AlreadyInstalled(_)) => {}
+        Err(e) => return Err(e),
+    }
+
+    match download_tts_asset(models_dir, voices, None) {
+        Ok(()) | Err(ModelError::AlreadyInstalled(_)) => {}
+        Err(e) => return Err(e),
+    }
+
     Ok(())
 }
 
@@ -402,11 +692,7 @@ mod tests {
         std::fs::write(dir.path().join("es_ES-davefx-medium.onnx"), b"x").unwrap();
         assert!(!is_piper_voice_installed(dir.path(), "es_ES-davefx-medium"));
         // Con ambos → true.
-        std::fs::write(
-            dir.path().join("es_ES-davefx-medium.onnx.json"),
-            b"{}",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("es_ES-davefx-medium.onnx.json"), b"{}").unwrap();
         assert!(is_piper_voice_installed(dir.path(), "es_ES-davefx-medium"));
     }
 
@@ -526,5 +812,14 @@ mod tests {
         );
         // El tempfile debe haberse dropeado sin dejar archivo.
         assert!(!dir.path().join("test-asset.bin").is_file());
+    }
+
+    #[test]
+    fn download_kokoro_voice_rejects_when_fully_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("kokoro-82m-v1.0.onnx"), b"onnx").unwrap();
+        std::fs::write(dir.path().join("voices-v1.0.bin"), b"voices").unwrap();
+        let res = download_kokoro_voice(dir.path());
+        assert!(matches!(res, Err(ModelError::AlreadyInstalled(_))));
     }
 }

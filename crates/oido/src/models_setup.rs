@@ -112,7 +112,7 @@ pub(crate) fn sanitize_config(cfg: &oido_config::ConfigStore) -> bool {
     // un id inválido.
     let valid_voice = oido_tts::voices::known_voice_ids();
     if !valid_voice.contains(&snap.tts.voice.as_str()) {
-        let old_voice = std::mem::replace(&mut snap.tts.voice, String::new());
+        let old_voice = std::mem::take(&mut snap.tts.voice);
         let fallback = oido_tts::PiperEngine::default_voice_id();
         snap.tts.voice = fallback.to_string();
         tracing::warn!(
@@ -128,9 +128,7 @@ pub(crate) fn sanitize_config(cfg: &oido_config::ConfigStore) -> bool {
     // soporta inglés fluidamente y forzamos `on_selection=false`
     // porque la heurística de detección ES/Kokoro aún no está en uso.
     if snap.tts.engine == TtsEngineKind::Kokoro && snap.tts.on_selection {
-        tracing::warn!(
-            "Kokoro no soporta G2P español limpio en v1; forzando on_selection=false"
-        );
+        tracing::warn!("Kokoro no soporta G2P español limpio en v1; forzando on_selection=false");
         snap.tts.on_selection = false;
         changed = true;
     }
